@@ -1,0 +1,23 @@
+# Binaries
+/boozle
+/boozle.exe
+/dist/
+
+# Go
+*.test
+*.out
+*.prof
+coverage.txt
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local examples / test PDFs that shouldn't be committed
+*.local.pdf

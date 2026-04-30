@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Builds run natively per OS because Ebiten requires CGO on macOS and Linux
+# (system OpenGL / Cocoa frameworks). Cross-compiling from one runner would
+# need goreleaser-cross or zig cc; we keep it simple for v1.
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - target: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - target: windows-amd64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Linux build deps
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev \
+            libxkbcommon-dev
+
+      - name: Build (${{ matrix.target }})
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ext=""
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then ext=".exe"; fi
+          version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA::7}"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
+            -o "dist/boozle${ext}" ./cmd/boozle
+
+      - name: Package (POSIX)
+        if: matrix.goos != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          name="boozle_${version}_${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "dist/boozle" "dist/${name}/"
+          cp README.md LICENSE NOTICE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Package (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $name = "boozle_${version}_${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/${name}" | Out-Null
+          Copy-Item "dist/boozle.exe" "dist/${name}/"
+          Copy-Item README.md, LICENSE, NOTICE "dist/${name}/"
+          Compress-Archive -Path "dist/${name}" -DestinationPath "dist/${name}.zip"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: publish-release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Stage release assets and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} staging/ \;
+          cp install.sh install.ps1 staging/
+          chmod +x staging/install.sh
+          cd staging
+          shasum -a 256 *.tar.gz *.zip install.sh install.ps1 > checksums.txt
+          ls -la
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            staging/*
+
+  bump-homebrew-tap:
+    name: bump-homebrew-tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute source tarball SHA256
+        id: sha
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          URL="https://github.com/gethash/boozle/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -fsSL "$URL" | shasum -a 256 | awk '{print $1}')
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          repository: gethash/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula version and sha256
+        working-directory: homebrew-tap
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          sed -i \
+            -e "s|url \"https://github.com/gethash/boozle/archive/refs/tags/.*\"|url \"https://github.com/gethash/boozle/archive/refs/tags/${TAG}.tar.gz\"|" \
+            -e "s|sha256 \".*\"|sha256 \"${SHA}\"|" \
+            Formula/boozle.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/boozle.rb
+          git commit -m "boozle ${TAG}"
+          git push

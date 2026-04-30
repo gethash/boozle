@@ -1,0 +1,37 @@
+boozle
+Copyright 2026 The boozle Authors
+
+This product includes software developed at the boozle project
+(https://github.com/gethash/boozle).
+
+------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------
+
+This product embeds and/or links to the following third-party components:
+
+* PDFium (https://pdfium.googlesource.com/pdfium/)
+  Copyright The Chromium Authors. All rights reserved.
+  Licensed under the Apache License, Version 2.0 and BSD-3-Clause.
+
+* go-pdfium (https://github.com/klippa-app/go-pdfium)
+  Copyright (c) Klippa.
+  Licensed under the MIT License.
+
+* wazero (https://github.com/tetratelabs/wazero)
+  Copyright Tetrate.
+  Licensed under the Apache License, Version 2.0.
+
+* Ebitengine (https://github.com/hajimehoshi/ebiten)
+  Copyright Hajime Hoshi and the Ebitengine authors.
+  Licensed under the Apache License, Version 2.0.
+
+* cobra (https://github.com/spf13/cobra)
+  Copyright (c) The cobra Authors.
+  Licensed under the Apache License, Version 2.0.
+
+* BurntSushi/toml (https://github.com/BurntSushi/toml)
+  Copyright (c) TOML authors.
+  Licensed under the MIT License.
+
+Full license texts are available in the upstream repositories listed above.

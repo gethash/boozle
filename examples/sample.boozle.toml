@@ -1,0 +1,45 @@
+# boozle sidecar configuration
+#
+# Place this file next to your PDF as `<file>.boozle.toml`
+# (e.g. `slides.pdf` → `slides.boozle.toml`) or pass it via `--config`.
+# Command-line flags take precedence over anything set here.
+
+# Default time per slide. Any Go duration string works: 30s, 1m30s, 2m, 750ms.
+auto = "30s"
+
+# Loop back to page 1 after the last page.
+loop = true
+
+# 1-indexed start page (must be inside `pages` if `pages` is set).
+start = 1
+
+# 0-indexed monitor (0 = primary).
+monitor = 0
+
+# Restrict playback to this page range. Comma-separated list of pages and
+# inclusive ranges. Omit or set to "" to play the entire deck.
+pages = "1-5,8,10-12"
+
+# Background fill colour shown around aspect-fitted pages and during
+# black-out / white-out swaps. #RGB, #RRGGBB, or #RRGGBBAA.
+bg = "#000000"
+
+# Show a segmented progress bar at the bottom of the screen. Each segment
+# represents one slide: completed slides glow with the brand rainbow gradient,
+# the current segment fills as the auto-advance timer counts down, and a page
+# counter (e.g. "3 / 24") appears in the bottom-right corner. Equivalent to --progress.
+progress = false
+
+# Quit automatically after the last page instead of stopping there.
+# Equivalent to --autoquit.
+autoquit = false
+
+# Per-page duration overrides (1-indexed). Useful when one slide needs
+# longer than the rest, e.g. a busy diagram at page 3.
+[[page]]
+n    = 3
+auto = "1m"
+
+[[page]]
+n    = 8
+auto = "5s"

@@ -29,6 +29,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            xvfb \
             libgl1-mesa-dev \
             libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev \
             libxkbcommon-dev
@@ -39,5 +40,10 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: go test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test -race -count=1 ./...
+
       - name: go test
+        if: runner.os != 'Linux'
         run: go test -race -count=1 ./...

@@ -189,6 +189,12 @@ go test ./...
 BOOZLE_TEST_PDF=/path/to/any.pdf go test -count=1 ./internal/pdf/...
 ```
 
+On headless Linux CI, run tests that import Ebitengine under Xvfb:
+
+```bash
+xvfb-run -a go test -race -count=1 ./...
+```
+
 ## How it works
 
 - **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) (Chromium's PDF engine) compiled to WebAssembly, run inside [`wazero`](https://github.com/tetratelabs/wazero) — a pure-Go WASM runtime. No native PDFium library, no `.dylib`/`.so`/`.dll` to ship alongside the binary.

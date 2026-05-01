@@ -3,6 +3,26 @@
 All notable changes to boozle are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] — 2026-05-02
+
+### Added
+
+- **Presenter view** (`--presenter-monitor`, `-P`): optional second fullscreen window for speaker use, showing the current slide, next-slide preview, slide counter, wall clock, elapsed session timer, and auto-advance timer. It can also be enabled from the TOML sidecar with `presenter_monitor = 0`; the presenter and audience displays must use different monitors.
+- **Slide transitions** (`--transition`): animated page changes with `slide` (lateral push, the default) or `fade` (cross-dissolve). Pass `--transition none` to restore the instant-cut behaviour. The style can also be set in the TOML sidecar with `transition = "fade"`. Non-directional jumps (Home, End, digit+Enter, `l`) always use a fade regardless of the configured style.
+
+### Fixed
+
+- Progress bar: removed a stray 1 px white line that appeared above the bar on certain slide backgrounds.
+- Presenter view: keyboard and mouse-wheel navigation now forward to the main presentation window, so the usual key bindings work when either screen has focus.
+- Slide overview: selection, "you are here", and hover borders now hug the actual slide edges instead of the full cell box, so frames are correctly sized for non-square slide aspect ratios.
+
+### Changed
+
+- Presenter view: replaced the raw split-pane layout with framed current/next slide panels plus a larger clock, slide counter, and timer area.
+- Presenter view: progress now uses the same segmented brand-rainbow treatment as the slide progress overlay.
+- Slide overview: preview and thumbnail grid now use the same framed dark panel style as presenter mode.
+- Slide overview: dark scrim opacity increased from 78 % to 90 % for better thumbnail contrast.
+
 ## [1.0.0] — 2026-04-29
 
 First stable release.

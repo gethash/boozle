@@ -12,8 +12,10 @@ You have a PDF deck. You want to play it full-screen and have it auto-advance ev
 
 - **One file.** No installer, no runtime, no Python. Download a binary, `chmod +x`, run.
 - **Auto-advance with per-slide overrides.** Default 30 s, page 7 needs a minute, page 3 should fly by — say so in a TOML sidecar.
-- **Progress overlay.** A page-position bar and auto-advance countdown bar keep you oriented at a glance.
-- **Slide overview.** Press `Tab` for a split-view thumbnail grid — large preview on the left, all slides on the right. Navigate with arrow keys or click to jump anywhere.
+- **Slide transitions.** Pages animate in with a lateral push or cross-fade — choose `slide`, `fade`, or `none` via `--transition`.
+- **Progress overlay.** A segmented brand-rainbow page-position bar and auto-advance countdown keep you oriented at a glance.
+- **Presenter view.** Use a second monitor for a speaker display with current slide, next slide, wall clock, elapsed time, slide counter, and matching progress.
+- **Slide overview.** Press `Tab` for a framed thumbnail grid with a large selected-slide preview. Navigate with arrow keys or click to jump anywhere.
 - **Resolution-aware.** Pages re-rasterise at native pixel resolution on every monitor — crisp on Retina, 4K, mixed-DPI multi-monitor.
 - **Permissively licensed.** Apache-2.0. Uses Chromium's PDFium (Apache-2.0) via a WebAssembly runtime, so the rendering engine is portable and never needs a system library.
 - **Built in CI.** GitHub Actions produces native binaries for macOS (Apple Silicon + Intel), Linux x86-64, and Windows x86-64.
@@ -40,7 +42,7 @@ The script detects your OS/arch, fetches the right archive, verifies its SHA-256
 Override defaults with env vars:
 
 ```bash
-BOOZLE_VERSION=v0.2.0 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.1.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
@@ -88,6 +90,8 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `--bg <hex>` | `#000000` | Background fill (`#RGB`, `#RRGGBB`, or `#RRGGBBAA`). |
 | `--progress` | `false` | Show page-position bar and auto-advance countdown overlay. |
 | `--autoquit` | `false` | Quit after the last page instead of stopping. |
+| `--transition <style>` | `slide` | Page transition: `slide` (lateral push), `fade` (cross-dissolve), `none` (instant cut). |
+| `-P, --presenter-monitor <N>` | `-1` | Open presenter view on monitor N. Use a different monitor than `--monitor`. |
 | `--no-fullscreen` | `false` | Run windowed (debugging / dev). |
 | `--config <path>` | _auto_ | Use this TOML sidecar instead of the auto-detected one. |
 | `-h, --help` | | Show help. |
@@ -110,17 +114,21 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `Tab` | open slide overview (arrow keys or click to select, `Enter` to jump) |
 | `q` `Esc` | quit |
 
+When presenter mode is enabled, the same navigation keys also work when the presenter window has focus.
+
 ### Sidecar configuration (per-PDF)
 
 Create `slides.boozle.toml` next to `slides.pdf`. Command-line flags always win over sidecar values, so the sidecar is a good place for per-deck defaults:
 
 ```toml
-auto     = "30s"
-loop     = true
-pages    = "1-5,8,10-12"
-bg       = "#0a0a0a"
-progress = true
-autoquit = false
+auto       = "30s"
+loop       = true
+pages      = "1-5,8,10-12"
+bg         = "#0a0a0a"
+progress   = true
+autoquit   = false
+transition = "fade"
+# presenter_monitor = 0
 
 [[page]]
 n    = 3
@@ -147,6 +155,12 @@ boozle deck.pdf --pages 80-100 --monitor 1
 
 # Use the sidecar for everything, just press play:
 boozle deck.pdf
+
+# Smooth fade transition instead of the default push:
+boozle deck.pdf --transition fade
+
+# Audience display on monitor 1, presenter view on monitor 0:
+boozle deck.pdf --monitor 1 --presenter-monitor 0
 ```
 
 ## Build from source
@@ -179,6 +193,7 @@ BOOZLE_TEST_PDF=/path/to/any.pdf go test -count=1 ./internal/pdf/...
 
 - **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) (Chromium's PDF engine) compiled to WebAssembly, run inside [`wazero`](https://github.com/tetratelabs/wazero) — a pure-Go WASM runtime. No native PDFium library, no `.dylib`/`.so`/`.dll` to ship alongside the binary.
 - **Windowing & input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles the fullscreen window, vsync, monitor selection, and HiDPI scale factors.
+- **Presenter view:** the main window stays the source of truth and streams presenter state over a local Unix socket; presenter-window key presses are forwarded back so either display can drive the deck.
 - **Caching:** an LRU keyed by `(page, pixel-width, pixel-height)` keeps the current and a few neighbour pages rasterised; a background goroutine pre-fetches the next page so auto-advance never stalls on PDFium.
 - **Sidecar:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses the per-PDF config; flags override sidecar values via [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag).
 

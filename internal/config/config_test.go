@@ -76,6 +76,10 @@ start   = 4
 monitor = 1
 pages   = "2-5"
 bg      = "#112233"
+progress = true
+autoquit = true
+transition = "fade"
+presenter_monitor = 2
 
 [[page]]
 n    = 3
@@ -90,7 +94,7 @@ auto = "2m"
 
 	// Flags carry cobra defaults (StartPage=1, MonitorIdx=0); sidecar fills
 	// the rest because no explicit flags override.
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, Background: "#000000"})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, Background: "#000000", PresenterMonitor: -1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -115,14 +119,34 @@ auto = "2m"
 	if c.PerPage[3] != 1*time.Second || c.PerPage[5] != 2*time.Minute {
 		t.Errorf("PerPage = %+v, want {3:1s, 5:2m}", c.PerPage)
 	}
+	if !c.Progress || !c.AutoQuit {
+		t.Errorf("Progress/AutoQuit = %v/%v, want true/true", c.Progress, c.AutoQuit)
+	}
+	if c.Transition != "fade" {
+		t.Errorf("Transition = %q, want fade", c.Transition)
+	}
+	if c.PresenterMonitor != 2 {
+		t.Errorf("PresenterMonitor = %d, want 2", c.PresenterMonitor)
+	}
 
 	// Now: explicit flag for --auto wins over sidecar.
-	c2, err := Load(Flags{PDFPath: pdf, StartPage: 1, Auto: 5 * time.Second})
+	c2, err := Load(Flags{PDFPath: pdf, StartPage: 1, Auto: 5 * time.Second, PresenterMonitor: -1})
 	if err != nil {
 		t.Fatalf("Load with --auto: %v", err)
 	}
 	if c2.Auto != 5*time.Second {
 		t.Errorf("flag --auto should win: got %v want 5s", c2.Auto)
+	}
+
+	c3, err := Load(Flags{PDFPath: pdf, StartPage: 1, Transition: "none", PresenterMonitor: 5})
+	if err != nil {
+		t.Fatalf("Load with presenter/transition flags: %v", err)
+	}
+	if c3.Transition != "none" {
+		t.Errorf("flag --transition should win: got %q want none", c3.Transition)
+	}
+	if c3.PresenterMonitor != 5 {
+		t.Errorf("flag --presenter-monitor should win: got %d want 5", c3.PresenterMonitor)
 	}
 }
 
@@ -132,7 +156,7 @@ func TestLoadNoSidecarStillWorks(t *testing.T) {
 	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -155,7 +179,7 @@ func TestLoadSidecarProgressAndAutoQuit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1})
+	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -168,7 +192,7 @@ func TestLoadSidecarProgressAndAutoQuit(t *testing.T) {
 
 	// Explicit flag wins: setting Progress/AutoQuit true via flag keeps them true
 	// even when the sidecar would also set them (the flag path skips the sidecar check).
-	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, Progress: true, AutoQuit: true})
+	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, Progress: true, AutoQuit: true, PresenterMonitor: -1})
 	if err != nil {
 		t.Fatalf("Load with flags: %v", err)
 	}

@@ -13,8 +13,12 @@ loop = true
 # 1-indexed start page (must be inside `pages` if `pages` is set).
 start = 1
 
-# 0-indexed monitor (0 = primary).
+# 0-indexed monitor for the audience display (0 = primary).
 monitor = 0
+
+# Monitor index for the presenter view (current + next slide, timers, clock, progress).
+# Set to a non-negative value to enable. Example: laptop screen = 0, projector = 1.
+# presenter_monitor = 0
 
 # Restrict playback to this page range. Comma-separated list of pages and
 # inclusive ranges. Omit or set to "" to play the entire deck.
@@ -33,6 +37,10 @@ progress = false
 # Quit automatically after the last page instead of stopping there.
 # Equivalent to --autoquit.
 autoquit = false
+
+# Slide transition style: "slide" (default lateral push), "fade", or "none".
+# Equivalent to --transition.
+transition = "slide"
 
 # Per-page duration overrides (1-indexed). Useful when one slide needs
 # longer than the rest, e.g. a busy diagram at page 3.

@@ -7,14 +7,18 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/display"
+	"github.com/gethash/boozle/internal/ipc"
 	"github.com/gethash/boozle/internal/pdf"
 	"github.com/gethash/boozle/internal/timer"
 )
@@ -27,6 +31,27 @@ const (
 	cacheCap = 8
 	// prefetchQueue is bounded so input spam doesn't pile up work.
 	prefetchQueue = 4
+
+	presenterCmdQuit       = "quit"
+	presenterCmdEscape     = "escape"
+	presenterCmdTab        = "tab"
+	presenterCmdPause      = "pause"
+	presenterCmdBlackout   = "blackout"
+	presenterCmdWhiteout   = "whiteout"
+	presenterCmdFullscreen = "fullscreen"
+	presenterCmdReturnLast = "return-last"
+	presenterCmdHome       = "home"
+	presenterCmdEnd        = "end"
+	presenterCmdEnter      = "enter"
+	presenterCmdBackspace  = "backspace"
+	presenterCmdRight      = "right"
+	presenterCmdLeft       = "left"
+	presenterCmdDown       = "down"
+	presenterCmdUp         = "up"
+	presenterCmdSpace      = "space"
+	presenterCmdPageDown   = "page-down"
+	presenterCmdPageUp     = "page-up"
+	presenterCmdDigit      = "digit"
 )
 
 // Run opens the presentation window and blocks until the user quits.
@@ -62,6 +87,56 @@ func Run(cfg config.Config) error {
 		auto:       auto,
 		pageList:   pageList,
 		listIdx:    startIdx,
+		startedAt:  time.Now(),
+	}
+
+	g.trans.style = parseTransStyle(cfg.Transition)
+	g.trans.frames = transFrames
+
+	// ── Presenter view subprocess ─────────────────────────────────────────
+	if cfg.PresenterMonitor >= 0 {
+		if cfg.PresenterMonitor == cfg.MonitorIdx {
+			return fmt.Errorf(
+				"--presenter-monitor %d conflicts with --monitor %d: use different monitors",
+				cfg.PresenterMonitor, cfg.MonitorIdx,
+			)
+		}
+		socketPath := ipc.SocketPath(os.Getpid())
+		srv, err := ipc.Listen(socketPath)
+		if err != nil {
+			return fmt.Errorf("presenter IPC: %w", err)
+		}
+		defer srv.Close()
+		go srv.AcceptLoop()
+
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve executable: %w", err)
+		}
+		cmd := exec.Command(self,
+			cfg.PDFPath,
+			"--monitor", strconv.Itoa(cfg.PresenterMonitor),
+			"--_presenter-socket", socketPath,
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("spawn presenter: %w", err)
+		}
+		defer func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		}()
+
+		g.stateCh = make(chan ipc.PresenterState, 1)
+		g.presenterCmds = srv.Commands()
+		go func() {
+			for st := range g.stateCh {
+				srv.Send(st)
+			}
+		}()
 	}
 
 	ebiten.SetWindowTitle(fmt.Sprintf("boozle — %s", filepath.Base(cfg.PDFPath)))
@@ -119,8 +194,9 @@ type Game struct {
 	prefetcher *pdf.Prefetcher
 	auto       *timer.Auto
 
-	pageList []int // 0-indexed page numbers, in playback order
-	listIdx  int   // index into pageList
+	pageList  []int // 0-indexed page numbers, in playback order
+	listIdx   int   // index into pageList
+	startedAt time.Time
 
 	digitBuf string // numeric-jump input buffer, e.g. "12" → Enter → page 12
 
@@ -138,7 +214,10 @@ type Game struct {
 	cursorIdleFrames int
 	quit             bool // set by advance() when --autoquit fires
 
-	ov overview
+	trans         transition
+	ov            overview
+	stateCh       chan ipc.PresenterState // nil when presenter view is disabled
+	presenterCmds <-chan ipc.PresenterCommand
 }
 
 type renderBounds struct{ dstX, dstY, dstW, dstH int }
@@ -148,6 +227,7 @@ func (g *Game) Update() error {
 	if g.quit {
 		return ErrQuit
 	}
+	presenterCmds := g.drainPresenterCommands()
 
 	// Auto-hide cursor after ~3 s of inactivity.
 	cx, cy := ebiten.CursorPosition()
@@ -165,30 +245,36 @@ func (g *Game) Update() error {
 
 	// Overview intercepts Escape and all navigation while active.
 	if g.ov.phase != ovOff {
-		return g.updateOverview()
+		err := g.updateOverview(presenterCmds)
+		g.broadcastState()
+		return err
 	}
 
-	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) || inpututil.IsKeyJustPressed(ebiten.KeyQ) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) ||
+		inpututil.IsKeyJustPressed(ebiten.KeyQ) ||
+		presenterCmdPressed(presenterCmds, presenterCmdEscape) ||
+		presenterCmdPressed(presenterCmds, presenterCmdQuit) {
 		return ErrQuit
 	}
 	// Tab enters overview (not during blank screens).
-	if inpututil.IsKeyJustPressed(ebiten.KeyTab) && g.bufW > 0 && g.bufH > 0 && !g.blackout && !g.whiteout {
+	if (inpututil.IsKeyJustPressed(ebiten.KeyTab) || presenterCmdPressed(presenterCmds, presenterCmdTab)) &&
+		g.bufW > 0 && g.bufH > 0 && !g.blackout && !g.whiteout {
 		g.openOverview()
 		return nil
 	}
 
 	prevIdx := g.listIdx
 
-	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyP) || presenterCmdPressed(presenterCmds, presenterCmdPause) {
 		g.auto.TogglePause(g.currentPage() + 1)
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyB) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyB) || presenterCmdPressed(presenterCmds, presenterCmdBlackout) {
 		g.blackout = !g.blackout
 		if g.blackout {
 			g.whiteout = false
 		}
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyW) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyW) || presenterCmdPressed(presenterCmds, presenterCmdWhiteout) {
 		g.whiteout = !g.whiteout
 		if g.whiteout {
 			g.blackout = false
@@ -198,10 +284,17 @@ func (g *Game) Update() error {
 		g.advance(+1)
 	}
 
-	g.handleNavigation()
+	g.handleNavigation(presenterCmds)
 
 	if g.listIdx != prevIdx {
 		g.auto.Reset(g.currentPage() + 1)
+	}
+
+	if g.trans.active {
+		g.trans.frame++
+		if g.trans.frame >= g.trans.frames {
+			g.trans.clear()
+		}
 	}
 
 	if g.bufW > 0 && g.bufH > 0 {
@@ -210,6 +303,7 @@ func (g *Game) Update() error {
 		}
 		g.prefetchNeighbors()
 	}
+	g.broadcastState()
 	return nil
 }
 
@@ -225,9 +319,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 	screen.Fill(g.bg)
 	if g.display != nil {
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(float64(g.displayBounds.dstX), float64(g.displayBounds.dstY))
-		screen.DrawImage(g.display, op)
+		if g.trans.active && g.trans.prevImg != nil {
+			g.drawTransition(screen)
+		} else {
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Translate(float64(g.displayBounds.dstX), float64(g.displayBounds.dstY))
+			screen.DrawImage(g.display, op)
+		}
 	}
 	g.drawProgressOverlay(screen)
 	if g.ov.phase != ovOff {
@@ -257,19 +355,95 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 
 func (g *Game) currentPage() int { return g.pageList[g.listIdx] }
 
-// handleNavigation reads the keyboard and updates listIdx / digitBuf.
-func (g *Game) handleNavigation() {
+func (g *Game) drainPresenterCommands() []ipc.PresenterCommand {
+	if g.presenterCmds == nil {
+		return nil
+	}
+	var cmds []ipc.PresenterCommand
+	for range 64 {
+		select {
+		case cmd := <-g.presenterCmds:
+			cmds = append(cmds, cmd)
+		default:
+			return cmds
+		}
+	}
+	return cmds
+}
+
+func presenterCmdPressed(cmds []ipc.PresenterCommand, name string) bool {
+	for _, cmd := range cmds {
+		if cmd.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// broadcastState sends the current presentation state to the presenter slave.
+// Non-blocking: drops stale state if the IPC goroutine hasn't caught up.
+func (g *Game) broadcastState() {
+	if g.stateCh == nil {
+		return
+	}
+	nextPage := -1
+	if g.listIdx+1 < len(g.pageList) {
+		nextPage = g.pageList[g.listIdx+1]
+	} else if g.cfg.Loop && len(g.pageList) > 0 {
+		nextPage = g.pageList[0]
+	}
+	st := ipc.PresenterState{
+		Page:           g.currentPage(),
+		ListIndex:      g.listIdx,
+		Total:          len(g.pageList),
+		Fraction:       g.autoProgressFraction(),
+		Paused:         g.auto.Paused(),
+		NextPage:       nextPage,
+		ElapsedSeconds: int64(time.Since(g.startedAt).Seconds()),
+	}
+	// Drain-then-send so the slave always gets the latest frame, never a stale one.
+	select {
+	case g.stateCh <- st:
+	default:
+		select {
+		case <-g.stateCh:
+		default:
+		}
+		select {
+		case g.stateCh <- st:
+		default:
+		}
+	}
+}
+
+func (g *Game) autoProgressFraction() float64 {
+	if !g.auto.IsActive() {
+		return 0
+	}
+	if g.auto.Paused() {
+		return g.auto.FractionAtPause()
+	}
+	return g.auto.Fraction()
+}
+
+// handleNavigation reads local and presenter-window input and updates
+// listIdx / digitBuf.
+func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
 	// Digits accumulate into the jump buffer.
 	for k := ebiten.KeyDigit0; k <= ebiten.KeyDigit9; k++ {
 		if inpututil.IsKeyJustPressed(k) {
-			g.digitBuf += string(rune('0' + (k - ebiten.KeyDigit0)))
-			if len(g.digitBuf) > 6 {
-				g.digitBuf = g.digitBuf[len(g.digitBuf)-6:]
-			}
+			g.appendDigit(int(k - ebiten.KeyDigit0))
+		}
+	}
+	for _, cmd := range presenterCmds {
+		if cmd.Name == presenterCmdDigit {
+			g.appendDigit(cmd.Arg)
 		}
 	}
 
-	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
+		inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter) ||
+		presenterCmdPressed(presenterCmds, presenterCmdEnter) {
 		if g.digitBuf != "" {
 			n, err := strconv.Atoi(g.digitBuf)
 			g.digitBuf = ""
@@ -281,7 +455,8 @@ func (g *Game) handleNavigation() {
 	}
 
 	// Backspace: chip the digit buffer; if empty, go back one page.
-	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) ||
+		presenterCmdPressed(presenterCmds, presenterCmdBackspace) {
 		if len(g.digitBuf) > 0 {
 			g.digitBuf = g.digitBuf[:len(g.digitBuf)-1]
 		} else {
@@ -292,23 +467,31 @@ func (g *Game) handleNavigation() {
 
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) ||
 		inpututil.IsKeyJustPressed(ebiten.KeyPageDown) ||
-		inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		inpututil.IsKeyJustPressed(ebiten.KeySpace) ||
+		presenterCmdPressed(presenterCmds, presenterCmdRight) ||
+		presenterCmdPressed(presenterCmds, presenterCmdPageDown) ||
+		presenterCmdPressed(presenterCmds, presenterCmdSpace) {
 		g.advance(+1)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) ||
-		inpututil.IsKeyJustPressed(ebiten.KeyPageUp) {
+		inpututil.IsKeyJustPressed(ebiten.KeyPageUp) ||
+		presenterCmdPressed(presenterCmds, presenterCmdLeft) ||
+		presenterCmdPressed(presenterCmds, presenterCmdPageUp) {
 		g.advance(-1)
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyHome) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyHome) || presenterCmdPressed(presenterCmds, presenterCmdHome) {
+		g.beginTransition(0)
 		g.listIdx = 0
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) || presenterCmdPressed(presenterCmds, presenterCmdEnd) {
+		g.beginTransition(0)
 		g.listIdx = len(g.pageList) - 1
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyF) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyF) || presenterCmdPressed(presenterCmds, presenterCmdFullscreen) {
 		ebiten.SetFullscreen(!ebiten.IsFullscreen())
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyL) {
+	if inpututil.IsKeyJustPressed(ebiten.KeyL) || presenterCmdPressed(presenterCmds, presenterCmdReturnLast) {
+		g.beginTransition(0)
 		g.listIdx, g.prevListIdx = g.prevListIdx, g.listIdx
 	}
 
@@ -321,12 +504,23 @@ func (g *Game) handleNavigation() {
 	}
 }
 
+func (g *Game) appendDigit(n int) {
+	if n < 0 || n > 9 {
+		return
+	}
+	g.digitBuf += string(rune('0' + n))
+	if len(g.digitBuf) > 6 {
+		g.digitBuf = g.digitBuf[len(g.digitBuf)-6:]
+	}
+}
+
 // advance moves listIdx by delta, looping if --loop is set, else clamping.
 // Sets g.quit when --autoquit fires at the end of the deck.
 func (g *Game) advance(delta int) {
 	if len(g.pageList) == 0 {
 		return
 	}
+	g.beginTransition(sign(delta))
 	next := g.listIdx + delta
 	switch {
 	case next < 0:
@@ -352,6 +546,7 @@ func (g *Game) advance(delta int) {
 // jumpTo1Indexed seeks to a doc page (1-indexed). If it's been filtered out by
 // --pages, the nearest later page is selected.
 func (g *Game) jumpTo1Indexed(n int) {
+	g.beginTransition(0)
 	target := n - 1
 	for i, p := range g.pageList {
 		if p == target {

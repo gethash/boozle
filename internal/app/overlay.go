@@ -77,69 +77,79 @@ func (g *Game) drawProgressOverlay(screen *ebiten.Image) {
 	// ── Frosted backdrop (#080A12 brand dark) ──────────────────────────────
 	vector.FillRect(screen, 0, H-overlayPanelH, W, overlayPanelH,
 		color.RGBA{8, 10, 18, 175}, false)
-	vector.FillRect(screen, 0, H-overlayPanelH, W, 1,
-		color.RGBA{255, 255, 255, 20}, false)
 
-	// ── Segmented bar ─────────────────────────────────────────────────────
+	barY := H - float32(segBarBottomPad) - float32(segBarH)
+	drawSegmentedProgress(screen, 0, barY, W, float32(segBarH), n, g.listIdx, g.autoProgressFraction(), g.auto.Paused())
+
+	// Page counter in the bottom-right of the frosted panel.
+	label := fmt.Sprintf("%d / %d", g.listIdx+1, n)
+	ebitenutil.DebugPrintAt(screen, label, int(W)-len(label)*7-6, int(H)-19)
+}
+
+func drawSegmentedProgress(screen *ebiten.Image, x, y, w, h float32, total, current int, fraction float64, paused bool) {
+	if total <= 0 || w <= 0 || h <= 0 {
+		return
+	}
+	if current < 0 {
+		current = 0
+	}
+	if current >= total {
+		current = total - 1
+	}
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+
 	gap := float32(segGap)
-	segW := (W - gap*float32(n-1)) / float32(n)
+	segW := (w - gap*float32(total-1)) / float32(total)
 	if segW < 1 {
 		gap = 0
-		segW = W / float32(n)
+		segW = w / float32(total)
 	}
-	barY := H - float32(segBarBottomPad) - float32(segBarH)
 
 	// t maps a segment index to its position in the rainbow gradient [0,1].
 	gradPos := func(i int) float32 {
-		if n == 1 {
+		if total == 1 {
 			return 0
 		}
-		return float32(i) / float32(n-1)
+		return float32(i) / float32(total-1)
 	}
 
-	for i := range n {
-		x := float32(i) * (segW + gap)
+	for i := range total {
+		segX := x + float32(i)*(segW+gap)
 
 		switch {
-		case i < g.listIdx:
+		case i < current:
 			// Completed — full rainbow color at this segment's gradient position.
-			vector.FillRect(screen, x, barY, segW, segBarH,
+			vector.FillRect(screen, segX, y, segW, h,
 				rainbowAt(gradPos(i), 210), false)
 
-		case i == g.listIdx:
+		case i == current:
 			// Current — dark track (#1F2937) with rainbow timer fill.
-			vector.FillRect(screen, x, barY, segW, segBarH,
+			vector.FillRect(screen, segX, y, segW, h,
 				color.RGBA{31, 41, 55, 200}, false)
 
-			var frac float32
-			var fillAlpha uint8
-			if g.auto.IsActive() {
-				if g.auto.Paused() {
-					frac = float32(g.auto.FractionAtPause())
-					fillAlpha = 120 // muted while paused
-				} else {
-					frac = float32(g.auto.Fraction())
-					fillAlpha = 215
-				}
+			fillAlpha := uint8(215)
+			if paused {
+				fillAlpha = 120 // muted while paused
 			}
 
 			// Last slide fully elapsed → show full rainbow color (whole bar done).
-			if i == n-1 && frac >= 1 {
-				vector.FillRect(screen, x, barY, segW, segBarH,
+			if i == total-1 && fraction >= 1 {
+				vector.FillRect(screen, segX, y, segW, h,
 					rainbowAt(1, 210), false)
-			} else if fw := segW * frac; fw > 0 {
-				vector.FillRect(screen, x, barY, fw, segBarH,
+			} else if fw := segW * float32(fraction); fw > 0 {
+				vector.FillRect(screen, segX, y, fw, h,
 					rainbowAt(gradPos(i), fillAlpha), false)
 			}
 
 		default:
 			// Upcoming — brand neutral #374151.
-			vector.FillRect(screen, x, barY, segW, segBarH,
+			vector.FillRect(screen, segX, y, segW, h,
 				color.RGBA{55, 65, 81, 130}, false)
 		}
 	}
-
-	// Page counter in the bottom-right of the frosted panel.
-	label := fmt.Sprintf("%d / %d", g.listIdx+1, n)
-	ebitenutil.DebugPrintAt(screen, label, int(W)-len(label)*7-6, int(H)-19)
 }

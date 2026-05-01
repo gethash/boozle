@@ -6,9 +6,10 @@ import (
 	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
+
+	"github.com/gethash/boozle/internal/ipc"
 )
 
 const (
@@ -19,7 +20,7 @@ const (
 type ovPhase int
 
 const (
-	ovOff     ovPhase = iota
+	ovOff      ovPhase = iota
 	ovEntering         // anim 0 → 1
 	ovActive
 	ovExiting // anim 0 → 1
@@ -31,16 +32,16 @@ type thumbLoad struct {
 }
 
 type overview struct {
-	phase    ovPhase
-	anim     float64
-	cols     int
-	rows     int
-	cellW    float64
-	cellH    float64
-	padding  float64
-	rightX   int            // physical-pixel x where the right-half grid begins
-	thumbs   []*ebiten.Image // indexed by listIdx; nil = not yet loaded
-	thumbCh  chan thumbLoad
+	phase     ovPhase
+	anim      float64
+	cols      int
+	cellW     float64
+	cellH     float64
+	padding   float64
+	gridX     int
+	gridY     int
+	thumbs    []*ebiten.Image // indexed by listIdx; nil = not yet loaded
+	thumbCh   chan thumbLoad
 	thumbStop chan struct{}
 	fromIdx   int // listIdx when overview was opened
 	selIdx    int // keyboard-selected cell (list index)
@@ -50,27 +51,60 @@ type overview struct {
 	initMy    int
 }
 
-// computeOvGrid lays out the thumbnail grid on the right half of the screen.
-func computeOvGrid(n, bufW, bufH int) (rightX, cols, rows int, cellW, cellH, padding float64) {
-	rightX = bufW / 2
-	rightW := bufW - rightX
+type overviewLayout struct {
+	previewPanel   presenterRect
+	previewContent presenterRect
+	gridPanel      presenterRect
+	gridContent    presenterRect
+}
+
+func computeOverviewLayout(bufW, bufH int) overviewLayout {
+	margin := max(18, min(bufW, bufH)/52)
+	gap := max(14, margin/2)
+	rightW := int(float64(bufW) * 0.42)
+	rightW = max(rightW, 380)
+	rightW = min(rightW, int(float64(bufW)*0.55))
+	leftW := bufW - margin*2 - gap - rightW
+	if leftW < 1 {
+		leftW = 1
+	}
+	fullH := bufH - margin*2
+	if fullH < 1 {
+		fullH = 1
+	}
+
+	previewPanel := presenterRect{x: margin, y: margin, w: leftW, h: fullH}
+	gridPanel := presenterRect{x: margin + leftW + gap, y: margin, w: rightW, h: fullH}
+	return overviewLayout{
+		previewPanel:   previewPanel,
+		previewContent: insetPresenterRect(previewPanel, 16, 44, 16, 44),
+		gridPanel:      gridPanel,
+		gridContent:    insetPresenterRect(gridPanel, 14, 44, 14, 14),
+	}
+}
+
+// computeOvGrid lays out the thumbnail grid inside the framed overview panel.
+func computeOvGrid(n, bufW, bufH int) (gridX, gridY, cols, rows int, cellW, cellH, padding float64) {
+	content := computeOverviewLayout(bufW, bufH).gridContent
 	padding = 12.0
 	if n == 0 {
-		return rightX, 1, 1, float64(rightW) - 2*padding, float64(bufH) - 2*padding, padding
+		return content.x, content.y, 1, 1, float64(content.w) - 2*padding, float64(content.h) - 2*padding, padding
 	}
-	aspect := float64(rightW) / float64(bufH)
+	aspect := float64(content.w) / float64(content.h)
 	cols = max(1, int(math.Ceil(math.Sqrt(float64(n)*aspect))))
 	rows = (n + cols - 1) / cols
-	cellW = (float64(rightW) - padding*float64(cols+1)) / float64(cols)
-	cellH = (float64(bufH) - padding*float64(rows+1)) / float64(rows)
+	cellW = (float64(content.w) - padding*float64(cols+1)) / float64(cols)
+	cellH = (float64(content.h) - padding*float64(rows+1)) / float64(rows)
+	gridX = content.x
+	gridY = content.y
 	return
 }
 
 func (ov *overview) cellRect(i int) (x, y, w, h float64) {
 	col := i % ov.cols
 	row := i / ov.cols
-	x = float64(ov.rightX) + ov.padding + float64(col)*(ov.cellW+ov.padding)
-	y = ov.padding + float64(row)*(ov.cellH+ov.padding)
+	x = float64(ov.gridX) + ov.padding + float64(col)*(ov.cellW+ov.padding)
+	y = float64(ov.gridY) + ov.padding + float64(row)*(ov.cellH+ov.padding)
 	return x, y, ov.cellW, ov.cellH
 }
 
@@ -104,15 +138,15 @@ func lerpF(a, b, t float64) float64 {
 // openOverview initialises overview mode and kicks off thumbnail loading.
 func (g *Game) openOverview() {
 	n := len(g.pageList)
-	rightX, cols, rows, cellW, cellH, padding := computeOvGrid(n, g.bufW, g.bufH)
+	gridX, gridY, cols, _, cellW, cellH, padding := computeOvGrid(n, g.bufW, g.bufH)
 	g.ov = overview{
 		phase:     ovEntering,
 		cols:      cols,
-		rows:      rows,
 		cellW:     cellW,
 		cellH:     cellH,
 		padding:   padding,
-		rightX:    rightX,
+		gridX:     gridX,
+		gridY:     gridY,
 		thumbs:    make([]*ebiten.Image, n),
 		thumbCh:   make(chan thumbLoad, n),
 		thumbStop: make(chan struct{}),
@@ -168,7 +202,7 @@ func (g *Game) closeOverview(targetIdx int) {
 
 // updateOverview drives animation, handles input, and finalises the transition.
 // It is called from Update() whenever ov.phase != ovOff.
-func (g *Game) updateOverview() error {
+func (g *Game) updateOverview(presenterCmds []ipc.PresenterCommand) error {
 	ov := &g.ov
 
 	// Drain incoming thumbnails (up to 10 per frame to avoid stalls).
@@ -194,30 +228,40 @@ thumbDrain:
 
 	case ovActive:
 		n := len(g.pageList)
-		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) || inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyTab) ||
+			presenterCmdPressed(presenterCmds, presenterCmdEscape) ||
+			presenterCmdPressed(presenterCmds, presenterCmdTab) {
 			g.closeOverview(ov.fromIdx)
 			return nil
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyQ) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyQ) ||
+			presenterCmdPressed(presenterCmds, presenterCmdQuit) {
 			return ErrQuit
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) ||
+			presenterCmdPressed(presenterCmds, presenterCmdRight) {
 			ov.selIdx = (ov.selIdx + 1) % n
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) ||
+			presenterCmdPressed(presenterCmds, presenterCmdLeft) {
 			ov.selIdx = (ov.selIdx - 1 + n) % n
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) ||
+			presenterCmdPressed(presenterCmds, presenterCmdDown) {
 			if next := ov.selIdx + ov.cols; next < n {
 				ov.selIdx = next
 			}
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) ||
+			presenterCmdPressed(presenterCmds, presenterCmdUp) {
 			if prev := ov.selIdx - ov.cols; prev >= 0 {
 				ov.selIdx = prev
 			}
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter) ||
+			presenterCmdPressed(presenterCmds, presenterCmdEnter) {
 			g.closeOverview(ov.selIdx)
 			return nil
 		}
@@ -293,36 +337,32 @@ func (g *Game) drawOverview(screen *ebiten.Image) {
 	var scrimAlpha float64
 	switch ov.phase {
 	case ovEntering:
-		scrimAlpha = lerpF(0, 200, easeInOut(ov.anim))
+		scrimAlpha = lerpF(0, 230, easeInOut(ov.anim))
 	case ovActive:
-		scrimAlpha = 200
+		scrimAlpha = 230
 	case ovExiting:
-		scrimAlpha = lerpF(200, 0, easeInOut(ov.anim))
+		scrimAlpha = lerpF(230, 0, easeInOut(ov.anim))
 	}
+
 	vector.FillRect(screen, 0, 0, float32(W), float32(H),
 		color.RGBA{8, 10, 18, uint8(scrimAlpha)}, false)
 
-	// Large preview on the left half.
+	lo := computeOverviewLayout(g.bufW, g.bufH)
+	drawPresenterPanel(screen, lo.previewPanel)
+	drawPresenterPanel(screen, lo.gridPanel)
+	drawPresenterText(screen, "SELECTED", lo.previewPanel.x+18, lo.previewPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
+	drawPresenterText(screen, "OVERVIEW", lo.gridPanel.x+18, lo.gridPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
+
 	g.drawOverviewPreview(screen)
 
-	// Subtle divider between the two halves (active phase only).
-	if ov.phase == ovActive {
-		vector.FillRect(screen,
-			float32(ov.rightX)-1, 0, 1, float32(H),
-			color.RGBA{255, 255, 255, 18}, false)
-	}
-
-	// Thumbnail grid on the right half.
 	for i := range n {
 		g.drawOverviewTile(screen, i)
 	}
 
-	// Slide label centered in the left half (active phase only).
 	if ov.phase == ovActive && ov.selIdx >= 0 && ov.selIdx < n {
 		page1 := g.pageList[ov.selIdx] + 1
 		label := fmt.Sprintf("p. %d / %d", page1, n)
-		labelX := int(float64(ov.rightX)/2) - len(label)*3
-		ebitenutil.DebugPrintAt(screen, label, labelX, g.bufH-20)
+		drawPresenterText(screen, label, lo.previewPanel.x+18, lo.previewPanel.y+lo.previewPanel.h-32, 2, color.RGBA{248, 250, 252, 220})
 	}
 }
 
@@ -331,8 +371,9 @@ func (g *Game) drawOverview(screen *ebiten.Image) {
 // to fill the screen on exit.
 func (g *Game) drawOverviewPreview(screen *ebiten.Image) {
 	ov := &g.ov
-	leftW := float64(ov.rightX)
-	leftH := float64(g.bufH)
+	content := computeOverviewLayout(g.bufW, g.bufH).previewContent
+	leftW := float64(content.w)
+	leftH := float64(content.h)
 
 	// Select the image to display.
 	var img *ebiten.Image
@@ -375,8 +416,8 @@ func (g *Game) drawOverviewPreview(screen *ebiten.Image) {
 	s := math.Min(leftW/iW, leftH/iH)
 	fitW := iW * s
 	fitH := iH * s
-	fitX := (leftW - fitW) / 2
-	fitY := (leftH - fitH) / 2
+	fitX := float64(content.x) + (leftW-fitW)/2
+	fitY := float64(content.y) + (leftH-fitH)/2
 
 	var tx, ty, tw, th float64
 
@@ -460,23 +501,29 @@ func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
 		return
 	}
 
+	// imgX/imgY/imgW/imgH track the actual rendered image bounds (aspect-fitted
+	// within the cell). Borders are drawn at these bounds, not the cell bounds.
+	var imgX, imgY, imgW, imgH float64
+
 	img := ov.thumbs[i]
 	if img != nil {
 		iW := float64(img.Bounds().Dx())
 		iH := float64(img.Bounds().Dy())
 		if iW > 0 && iH > 0 {
-			// Aspect-fit within the cell.
 			sc := math.Min(tw/iW, th/iH)
-			dw := iW * sc
-			dh := iH * sc
+			imgW = iW * sc
+			imgH = iH * sc
+			imgX = tx + (tw-imgW)/2
+			imgY = ty + (th-imgH)/2
 			op := &ebiten.DrawImageOptions{}
 			op.GeoM.Scale(sc, sc)
-			op.GeoM.Translate(tx+(tw-dw)/2, ty+(th-dh)/2)
+			op.GeoM.Translate(imgX, imgY)
 			op.ColorScale.ScaleAlpha(float32(alpha))
 			screen.DrawImage(img, op)
 		}
 	} else {
-		// Placeholder rectangle.
+		// Placeholder: use cell bounds until the thumbnail loads.
+		imgX, imgY, imgW, imgH = tx, ty, tw, th
 		if a := uint8(alpha * 200); a > 0 {
 			vector.FillRect(screen,
 				float32(tx), float32(ty), float32(tw), float32(th),
@@ -484,8 +531,8 @@ func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
 		}
 	}
 
-	// Selection / hover border (active phase only).
-	if ov.phase != ovActive {
+	// Selection / hover border — flush against the actual slide image.
+	if ov.phase != ovActive || imgW < 1 || imgH < 1 {
 		return
 	}
 	switch {
@@ -496,24 +543,24 @@ func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
 		}
 		c := rainbowAt(gradT, 255)
 		bw := float64(2)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty+th-bw), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(bw), float32(th), c, false)
-		vector.FillRect(screen, float32(tx+tw-bw), float32(ty), float32(bw), float32(th), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
+		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
 	case i == ov.fromIdx:
 		// Dim grey border — "you are here" indicator.
 		c := color.RGBA{180, 180, 180, 160}
 		bw := float64(2)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty+th-bw), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(bw), float32(th), c, false)
-		vector.FillRect(screen, float32(tx+tw-bw), float32(ty), float32(bw), float32(th), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
+		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
 	case i == ov.hoverIdx:
 		c := color.RGBA{255, 255, 255, 120}
 		bw := float64(1)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty+th-bw), float32(tw), float32(bw), c, false)
-		vector.FillRect(screen, float32(tx), float32(ty), float32(bw), float32(th), c, false)
-		vector.FillRect(screen, float32(tx+tw-bw), float32(ty), float32(bw), float32(th), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
+		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
+		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
 	}
 }

@@ -16,7 +16,7 @@ import (
 
 // Set by goreleaser via -ldflags.
 var (
-	version = "dev"
+	version = "v1.1.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -39,16 +39,19 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var (
-		auto         time.Duration
-		loop         bool
-		startPage    int
-		monitorIdx   int
-		pages        string
-		bg           string
-		noFullscreen bool
-		configPath   string
-		progress     bool
-		autoQuit     bool
+		auto             time.Duration
+		loop             bool
+		startPage        int
+		monitorIdx       int
+		pages            string
+		bg               string
+		noFullscreen     bool
+		configPath       string
+		progress         bool
+		autoQuit         bool
+		transition       string
+		presenterMonitor int
+		presenterSocket  string // hidden internal flag for the slave subprocess
 	)
 
 	cmd := &cobra.Command{
@@ -69,7 +72,10 @@ Keybindings:
   w                          white-out screen (toggle)
   f                          toggle fullscreen
   Tab                        slide overview (navigate thumbnails, Enter or click to jump)
-  q  Esc                     quit`,
+  q  Esc                     quit
+
+Presenter view (--presenter-monitor):
+  Same navigation keys work when either display has focus.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -87,18 +93,25 @@ Keybindings:
 				return err
 			}
 
+			// Presenter slave mode: spawned by the master with a hidden flag.
+			if presenterSocket != "" {
+				return app.RunPresenter(presenterSocket, pdfPath, monitorIdx)
+			}
+
 			cfg, err := config.Load(config.Flags{
-				PDFPath:      pdfPath,
-				Auto:         auto,
-				Loop:         loop,
-				StartPage:    startPage,
-				MonitorIdx:   monitorIdx,
-				Pages:        pages,
-				Background:   bg,
-				NoFullscreen: noFullscreen,
-				ConfigPath:   configPath,
-				Progress:     progress,
-				AutoQuit:     autoQuit,
+				PDFPath:          pdfPath,
+				Auto:             auto,
+				Loop:             loop,
+				StartPage:        startPage,
+				MonitorIdx:       monitorIdx,
+				Pages:            pages,
+				Background:       bg,
+				NoFullscreen:     noFullscreen,
+				ConfigPath:       configPath,
+				Progress:         progress,
+				AutoQuit:         autoQuit,
+				Transition:       transition,
+				PresenterMonitor: presenterMonitor,
 			})
 			if err != nil {
 				return err
@@ -118,6 +131,10 @@ Keybindings:
 	cmd.Flags().StringVar(&configPath, "config", "", "explicit sidecar config path")
 	cmd.Flags().BoolVar(&progress, "progress", false, "show page-position and auto-advance progress overlay")
 	cmd.Flags().BoolVar(&autoQuit, "autoquit", false, "quit after the last page instead of stopping")
+	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")
+	cmd.Flags().IntVarP(&presenterMonitor, "presenter-monitor", "P", -1, "monitor index for presenter view (-1 = disabled)")
+	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
+	_ = cmd.Flags().MarkHidden("_presenter-socket")
 
 	return cmd
 }
@@ -137,7 +154,8 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "      --progress          show page-position and countdown bars")
 	fmt.Fprintln(w, "      --autoquit          quit after the last page")
 	fmt.Fprintln(w, "  -s, --start <N>         start at page N (1-indexed)")
-	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index (0 = primary)")
+	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index for slides (0 = primary)")
+	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
 	fmt.Fprintln(w)

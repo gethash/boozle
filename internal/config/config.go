@@ -15,17 +15,19 @@ import (
 
 // Flags is the raw input from cobra; zero-values mean "unset".
 type Flags struct {
-	PDFPath      string
-	Auto         time.Duration
-	Loop         bool
-	StartPage    int
-	MonitorIdx   int
-	Pages        string
-	Background   string
-	NoFullscreen bool
-	ConfigPath   string
-	Progress     bool
-	AutoQuit     bool
+	PDFPath         string
+	Auto            time.Duration
+	Loop            bool
+	StartPage       int
+	MonitorIdx      int
+	Pages           string
+	Background      string
+	NoFullscreen    bool
+	ConfigPath      string
+	Progress        bool
+	AutoQuit        bool
+	Transition      string
+	PresenterMonitor int // -1 = disabled
 }
 
 // Config is the resolved configuration the app actually runs with.
@@ -40,9 +42,11 @@ type Config struct {
 	NoFullscreen bool
 
 	// PerPage maps 1-indexed page numbers to per-page auto-advance overrides.
-	PerPage  map[int]time.Duration
-	Progress bool // show page-position and auto-advance progress overlay
-	AutoQuit bool // quit after the last page instead of stopping
+	PerPage          map[int]time.Duration
+	Progress         bool   // show page-position and auto-advance progress overlay
+	AutoQuit         bool   // quit after the last page instead of stopping
+	Transition       string // slide transition style: "none", "slide", "fade"
+	PresenterMonitor int    // -1 = disabled; monitor index for the presenter view window
 }
 
 // Color is an RGBA color parsed from a hex string.
@@ -50,15 +54,17 @@ type Color struct{ R, G, B, A uint8 }
 
 // sidecar mirrors the TOML schema. All fields are optional; flags win on conflict.
 type sidecar struct {
-	Auto       string         `toml:"auto"`
-	Loop       *bool          `toml:"loop"`
-	StartPage  *int           `toml:"start"`
-	MonitorIdx *int           `toml:"monitor"`
-	Pages      string         `toml:"pages"`
-	Background string         `toml:"bg"`
-	Progress   *bool          `toml:"progress"`
-	AutoQuit   *bool          `toml:"autoquit"`
-	PerPage    []perPageEntry `toml:"page"`
+	Auto             string         `toml:"auto"`
+	Loop             *bool          `toml:"loop"`
+	StartPage        *int           `toml:"start"`
+	MonitorIdx       *int           `toml:"monitor"`
+	Pages            string         `toml:"pages"`
+	Background       string         `toml:"bg"`
+	Progress         *bool          `toml:"progress"`
+	AutoQuit         *bool          `toml:"autoquit"`
+	Transition       string         `toml:"transition"`
+	PresenterMonitor *int           `toml:"presenter_monitor"`
+	PerPage          []perPageEntry `toml:"page"`
 }
 
 type perPageEntry struct {
@@ -70,15 +76,17 @@ type perPageEntry struct {
 // Precedence: explicit flags > sidecar > defaults.
 func Load(f Flags) (Config, error) {
 	c := Config{
-		PDFPath:      f.PDFPath,
-		Auto:         f.Auto,
-		Loop:         f.Loop,
-		StartPage:    f.StartPage,
-		MonitorIdx:   f.MonitorIdx,
-		NoFullscreen: f.NoFullscreen,
-		Progress:     f.Progress,
-		AutoQuit:     f.AutoQuit,
-		PerPage:      map[int]time.Duration{},
+		PDFPath:          f.PDFPath,
+		Auto:             f.Auto,
+		Loop:             f.Loop,
+		StartPage:        f.StartPage,
+		MonitorIdx:       f.MonitorIdx,
+		NoFullscreen:     f.NoFullscreen,
+		Progress:         f.Progress,
+		AutoQuit:         f.AutoQuit,
+		Transition:       f.Transition,
+		PresenterMonitor: f.PresenterMonitor,
+		PerPage:          map[int]time.Duration{},
 	}
 
 	side, sidePath, err := loadSidecar(f.PDFPath, f.ConfigPath)
@@ -120,6 +128,12 @@ func Load(f Flags) (Config, error) {
 		if !f.AutoQuit && side.AutoQuit != nil {
 			c.AutoQuit = *side.AutoQuit
 		}
+		if c.Transition == "" && side.Transition != "" {
+			c.Transition = side.Transition
+		}
+		if c.PresenterMonitor == -1 && side.PresenterMonitor != nil {
+			c.PresenterMonitor = *side.PresenterMonitor
+		}
 		for _, e := range side.PerPage {
 			if e.Auto == "" {
 				continue
@@ -130,6 +144,10 @@ func Load(f Flags) (Config, error) {
 			}
 			c.PerPage[e.N] = d
 		}
+	}
+
+	if c.Transition == "" {
+		c.Transition = "slide"
 	}
 
 	pr, err := ParsePageRange(pagesSpec)

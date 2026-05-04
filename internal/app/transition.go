@@ -109,20 +109,19 @@ func (g *Game) drawTransition(screen *ebiten.Image) {
 	switch tr.curStyle {
 	case transSlide:
 		W := float64(g.bufW)
-		// new slide enters from the opposite side
+		// Forward navigation pushes left: the new slide enters from the right.
 		newOp := &ebiten.DrawImageOptions{}
 		applyDisplayScale(&newOp.GeoM, g.displayBounds)
 		newOp.GeoM.Translate(
-			float64(g.displayBounds.dstX)-float64(tr.dir)*W*(1-t),
+			float64(g.displayBounds.dstX)+float64(tr.dir)*W*(1-t),
 			float64(g.displayBounds.dstY),
 		)
 		newOp.Filter = ebiten.FilterLinear
 		screen.DrawImage(g.display, newOp)
-		// old slide exits toward dir side
 		oldOp := &ebiten.DrawImageOptions{}
 		applyDisplayScale(&oldOp.GeoM, tr.prevBounds)
 		oldOp.GeoM.Translate(
-			float64(tr.prevBounds.dstX)+float64(tr.dir)*W*t,
+			float64(tr.prevBounds.dstX)-float64(tr.dir)*W*t,
 			float64(tr.prevBounds.dstY),
 		)
 		oldOp.Filter = ebiten.FilterLinear

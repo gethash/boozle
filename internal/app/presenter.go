@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"os"
@@ -19,6 +20,11 @@ import (
 	"github.com/gethash/boozle/internal/pdf"
 )
 
+// presenterPrefetchQueue is sized to 1 because the presenter only ever
+// requests one neighbour (the next slide) at a time — a deeper queue is
+// pure waste here.
+const presenterPrefetchQueue = 1
+
 // PresenterGame is an ebiten.Game that renders the presenter view: current
 // slide on the left, next-slide preview + timer + clock on the right.
 type PresenterGame struct {
@@ -29,10 +35,57 @@ type PresenterGame struct {
 
 	bufW, bufH int
 
-	curImg  *ebiten.Image
-	curKey  pdf.CacheKey
-	nextImg *ebiten.Image
-	nextKey pdf.CacheKey
+	curImg     *ebiten.Image
+	curKey     pdf.CacheKey
+	curPinned  bool
+	nextImg    *ebiten.Image
+	nextKey    pdf.CacheKey
+	nextPinned bool
+
+	counterCache pageLabelCache
+	elapsedCache elapsedCache
+	clockCache   clockCache
+}
+
+// elapsedCache memoises the HH:MM:SS string by integer seconds.
+type elapsedCache struct {
+	seconds int64
+	s       string
+}
+
+func (e *elapsedCache) String(seconds int64) string {
+	if e.s == "" || e.seconds != seconds {
+		e.seconds = seconds
+		e.s = formatElapsed(seconds)
+	}
+	return e.s
+}
+
+// formatElapsed renders seconds as HH:MM:SS.
+func formatElapsed(seconds int64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	d := time.Duration(seconds) * time.Second
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+// clockCache memoises the wall-clock string at integer-second resolution.
+type clockCache struct {
+	unix int64
+	s    string
+}
+
+func (c *clockCache) String(now time.Time) string {
+	sec := now.Unix()
+	if c.s == "" || c.unix != sec {
+		c.unix = sec
+		c.s = now.Format("15:04:05")
+	}
+	return c.s
 }
 
 // RunPresenter opens the presenter window and blocks until the window closes
@@ -45,10 +98,10 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 	}
 	defer doc.Close()
 
-	cache := pdf.NewCache(cacheCap)
+	cache := pdf.NewCache(cacheBudgetInitial)
 	defer cache.Clear()
 
-	pf := pdf.NewPrefetcher(doc, cache, prefetchQueue)
+	pf := pdf.NewPrefetcher(doc, cache, presenterPrefetchQueue)
 	pf.Start()
 	defer pf.Stop()
 
@@ -79,6 +132,7 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 }
 
 func (g *PresenterGame) Update() error {
+	g.drainPendingUploads()
 	g.forwardInput()
 	st := g.receiver.Latest()
 	if g.bufW > 0 && g.bufH > 0 {
@@ -87,7 +141,41 @@ func (g *PresenterGame) Update() error {
 	return nil
 }
 
+// drainPendingUploads moves prefetcher RGBA into GPU images on the main
+// goroutine, where ebiten allows GPU operations.
+func (g *PresenterGame) drainPendingUploads() {
+	if g.prefetch == nil {
+		return
+	}
+	uploads := g.prefetch.Uploads()
+	for i := 0; i < maxUploadsPerFrame; i++ {
+		select {
+		case job := <-uploads:
+			if g.cache.Has(job.Key) {
+				if job.Cleanup != nil {
+					job.Cleanup()
+				}
+				if job.Done != nil {
+					job.Done()
+				}
+				continue
+			}
+			eimg := uploadRGBA(job.RGBA)
+			if job.Cleanup != nil {
+				job.Cleanup()
+			}
+			g.cache.Put(job.Key, eimg)
+			if job.Done != nil {
+				job.Done()
+			}
+		default:
+			return
+		}
+	}
+}
+
 func (g *PresenterGame) Draw(screen *ebiten.Image) {
+	resetTextPool()
 	st := g.receiver.Latest()
 
 	screen.Fill(color.RGBA{13, 15, 26, 255}) // #0D0F1A
@@ -106,7 +194,7 @@ func (g *PresenterGame) Draw(screen *ebiten.Image) {
 
 	drawImageInPresenterRect(screen, g.curImg, lo.currentContent)
 	drawImageInPresenterRect(screen, g.nextImg, lo.nextContent)
-	drawPresenterStatus(screen, lo.statusPanel, st)
+	g.drawPresenterStatus(screen, lo.statusPanel, st)
 }
 
 func (g *PresenterGame) Layout(outsideW, outsideH int) (int, int) {
@@ -114,9 +202,17 @@ func (g *PresenterGame) Layout(outsideW, outsideH int) (int, int) {
 	if sf <= 0 {
 		sf = 1
 	}
-	g.bufW = int(math.Round(float64(outsideW) * sf))
-	g.bufH = int(math.Round(float64(outsideH) * sf))
-	return g.bufW, g.bufH
+	pxW := int(math.Round(float64(outsideW) * sf))
+	pxH := int(math.Round(float64(outsideH) * sf))
+	if pxW != g.bufW || pxH != g.bufH {
+		g.bufW = pxW
+		g.bufH = pxH
+		if g.cache != nil && pxW > 0 && pxH > 0 {
+			g.cache.Resize(autoBudget(pxW, pxH))
+			g.cache.PurgeNotMatching(pxW, pxH)
+		}
+	}
+	return pxW, pxH
 }
 
 type presenterRect struct {
@@ -180,8 +276,8 @@ func insetPresenterRect(r presenterRect, left, top, right, bottom int) presenter
 	return presenterRect{x: r.x + left, y: r.y + top, w: w, h: h}
 }
 
-// maybeRefreshPanes renders current and next slides into ebiten.Images
-// when the IPC state or buffer size has changed.
+// maybeRefreshPanes loads the current and next slides as cache-owned GPU
+// images, pinning them so they aren't evicted while displayed.
 func (g *PresenterGame) maybeRefreshPanes(st ipc.PresenterState) {
 	lo := g.presenterLayout()
 
@@ -192,9 +288,12 @@ func (g *PresenterGame) maybeRefreshPanes(st ipc.PresenterState) {
 			if w > 0 && h > 0 {
 				key := pdf.CacheKey{Page: st.Page, W: w, H: h}
 				if g.curImg == nil || g.curKey != key {
-					g.curImg = g.loadSlide(key, g.curImg)
-					if g.curImg != nil {
+					if img, ok := g.loadSlide(key); ok {
+						g.unpinCur()
+						g.curImg = img
 						g.curKey = key
+						g.cache.Pin(key)
+						g.curPinned = true
 					}
 				}
 			}
@@ -208,40 +307,55 @@ func (g *PresenterGame) maybeRefreshPanes(st ipc.PresenterState) {
 			if w > 0 && h > 0 {
 				key := pdf.CacheKey{Page: st.NextPage, W: w, H: h}
 				if g.nextImg == nil || g.nextKey != key {
-					g.nextImg = g.loadSlide(key, g.nextImg)
-					if g.nextImg != nil {
+					if img, ok := g.loadSlide(key); ok {
+						g.unpinNext()
+						g.nextImg = img
 						g.nextKey = key
+						g.cache.Pin(key)
+						g.nextPinned = true
 					}
 				}
 				g.prefetch.Request(key)
 			}
 		}
-	} else {
-		if g.nextImg != nil {
-			g.nextImg.Deallocate()
-			g.nextImg = nil
-			g.nextKey = pdf.CacheKey{}
-		}
+	} else if g.nextImg != nil {
+		g.unpinNext()
+		g.nextImg = nil
+		g.nextKey = pdf.CacheKey{}
 	}
 }
 
-// loadSlide fetches key from cache (or renders synchronously on miss),
-// converts to an ebiten.Image, deallocates old, and returns the new image.
-// Returns nil on render error.
-func (g *PresenterGame) loadSlide(key pdf.CacheKey, old *ebiten.Image) *ebiten.Image {
-	rgba, ok := g.cache.Get(key)
-	if !ok {
-		img, cleanup, err := g.doc.RenderPage(key.Page, key.W, key.H)
-		if err != nil {
-			return old
-		}
-		g.cache.Put(key, img, cleanup)
-		rgba = img
+// loadSlide returns the GPU image for key — from cache if present, else by
+// rendering synchronously and inserting. The cache owns the image; the
+// caller must Pin it to prevent eviction while displayed.
+func (g *PresenterGame) loadSlide(key pdf.CacheKey) (*ebiten.Image, bool) {
+	if cached, ok := g.cache.Get(key); ok {
+		return cached.(*ebiten.Image), true
 	}
-	if old != nil {
-		old.Deallocate()
+	img, cleanup, err := g.doc.RenderPage(key.Page, key.W, key.H)
+	if err != nil {
+		return nil, false
 	}
-	return ebiten.NewImageFromImage(rgba)
+	eimg := uploadRGBA(img)
+	if cleanup != nil {
+		cleanup()
+	}
+	g.cache.Put(key, eimg)
+	return eimg, true
+}
+
+func (g *PresenterGame) unpinCur() {
+	if g.curPinned {
+		g.cache.Unpin(g.curKey)
+		g.curPinned = false
+	}
+}
+
+func (g *PresenterGame) unpinNext() {
+	if g.nextPinned {
+		g.cache.Unpin(g.nextKey)
+		g.nextPinned = false
+	}
 }
 
 func (g *PresenterGame) forwardInput() {
@@ -369,10 +483,11 @@ func drawImageInPresenterRect(screen, img *ebiten.Image, r presenterRect) {
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(float64(w)/float64(iw), float64(h)/float64(ih))
 	op.GeoM.Translate(float64(r.x+offX), float64(r.y+offY))
+	op.Filter = ebiten.FilterLinear
 	screen.DrawImage(img, op)
 }
 
-func drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.PresenterState) {
+func (g *PresenterGame) drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.PresenterState) {
 	if r.w <= 0 || r.h <= 0 {
 		return
 	}
@@ -392,19 +507,19 @@ func drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.Presenter
 	drawPresenterPanel(screen, slideCard)
 	drawPresenterPanel(screen, timerCard)
 
-	clock := time.Now().Format("15:04:05")
+	clock := g.clockCache.String(time.Now())
 	drawPresenterText(screen, "CLOCK", clockCard.x+16, clockCard.y+14, 2, color.RGBA{148, 163, 184, 255})
 	drawPresenterText(screen, clock, clockCard.x+16, clockCard.y+42, 3, color.RGBA{248, 250, 252, 255})
 
 	counter := "-- / --"
 	if st.Total > 0 {
-		counter = fmt.Sprintf("%d / %d", st.ListIndex+1, st.Total)
+		counter = g.counterCache.String(st.ListIndex, st.Total)
 	}
 	drawPresenterText(screen, "SLIDE", slideCard.x+16, slideCard.y+14, 2, color.RGBA{148, 163, 184, 255})
 	drawPresenterText(screen, counter, slideCard.x+16, slideCard.y+42, 3, color.RGBA{248, 250, 252, 255})
 
 	drawPresenterText(screen, "ELAPSED", timerCard.x+18, timerCard.y+16, 2, color.RGBA{148, 163, 184, 255})
-	drawPresenterGradientText(screen, formatElapsed(st.ElapsedSeconds), timerCard.x+18, timerCard.y+50, 5)
+	drawPresenterGradientText(screen, g.elapsedCache.String(st.ElapsedSeconds), timerCard.x+18, timerCard.y+50, 5)
 
 	status := "TIMER"
 	if st.Paused {
@@ -423,30 +538,49 @@ func drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.Presenter
 	}
 }
 
-func formatElapsed(seconds int64) string {
-	if seconds < 0 {
-		seconds = 0
+// ── text rendering ─────────────────────────────────────────────────────
+//
+// Per-frame pool of small DebugPrintAt scratch images. resetTextPool()
+// is called at the top of Draw; each drawPresenterText acquires a fresh
+// buffer so sequential calls can't trample each other's pixels before
+// Ebiten flushes (subsequent writes to a source image after a queued
+// DrawImage can otherwise be reordered visibly).
+var textPoolBufs []*ebiten.Image
+var textPoolNext int
+
+const textBufWidth = 1024
+const textBufHeight = 13
+
+func resetTextPool() { textPoolNext = 0 }
+
+func acquireTextBuf() *ebiten.Image {
+	for textPoolNext >= len(textPoolBufs) {
+		textPoolBufs = append(textPoolBufs, ebiten.NewImage(textBufWidth, textBufHeight))
 	}
-	d := time.Duration(seconds) * time.Second
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	b := textPoolBufs[textPoolNext]
+	textPoolNext++
+	b.Clear()
+	return b
 }
 
-// drawPresenterText renders s into a small off-screen image using DebugPrintAt,
+// drawPresenterText renders s into a pooled scratch image using DebugPrintAt,
 // then blits it to screen at (x, y) scaled by scale× and tinted.
 func drawPresenterText(screen *ebiten.Image, s string, x, y, scale int, clr color.Color) {
 	if s == "" || scale <= 0 {
 		return
 	}
-	buf := ebiten.NewImage(len(s)*7+2, 13)
+	width := len(s)*7 + 2
+	if width > textBufWidth {
+		width = textBufWidth
+	}
+	buf := acquireTextBuf()
 	ebitenutil.DebugPrintAt(buf, s, 0, 0)
+	src := buf.SubImage(image.Rect(0, 0, width, textBufHeight)).(*ebiten.Image)
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(float64(scale), float64(scale))
 	op.GeoM.Translate(float64(x), float64(y))
 	op.ColorScale.ScaleWithColor(clr)
-	screen.DrawImage(buf, op)
+	screen.DrawImage(src, op)
 }
 
 func drawWrappedPresenterText(screen *ebiten.Image, s string, x, y, maxW, maxY, scale int, clr color.Color) {

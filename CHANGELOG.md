@@ -11,8 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Presenter notes**: `[[page]] notes = "..."` entries in the TOML sidecar are now loaded and shown in presenter view for the current slide.
 - **One-monitor presenter testing**: `--no-fullscreen --monitor 0 --presenter-monitor 0` now opens both audience and presenter views as windowed views on the same monitor for local testing.
 
+### Changed
+
+- **Render cache stores GPU images, not CPU pixels**: page flips are now a pointer swap into the cache instead of an `ebiten.NewImageFromImage` re-upload of ~32 MB on every navigation. The cache uploads once via `WritePixels`, then PDFium's WASM-side bitmap and the Go-side RGBA copy are released immediately. Result: noticeably snappier flips on Retina/4K and a large drop in steady-state RAM (no more redundant CPU pixel buffers held alongside the GPU textures).
+- **Cache budget is auto-sized to the active display**: replaces the fixed 128 MB constant with a per-Layout budget of ~6 full-buffer pages, floored at 32 MB and capped at 512 MB. Small/laptop windows now use ~30–50 MB; multi-4K setups grow automatically.
+- **LRU is O(1)**: cache touch/evict no longer walks a slice on every Get/Put.
+- **Mipmap reuse during resize**: when the window is mid-drag and the cache doesn't yet have an entry at the new resolution, a larger same-page entry is linearly downsampled by the GPU as a stand-in while the prefetcher catches up at the exact size. No more PDFium hit per Layout tick during a resize.
+- **Direction-aware prefetch**: forward marches now prefetch `[+1, +2, +3, -1]` (mirrored on backward), with the queue depth bumped from 4 to 8. Idle state uses the cheaper `[+1, -1]`.
+- **Stale-DPI cache cleanup on monitor change**: dragging a window between displays at different scale factors now proactively evicts entries strictly larger than the new buffer instead of leaving them to age out of the LRU naturally.
+
 ### Fixed
 
+- **Transient stalls during forward navigation**: rapid `Space` or `→` no longer drops prefetch requests on the floor (queue size 4 was too tight).
+- **Per-frame allocation churn in presenter view**: clock, slide counter, and elapsed-timer strings are now memoised at integer-second resolution. Status-text rendering reuses pooled scratch buffers instead of allocating a fresh `ebiten.Image` per character per frame.
+- **Per-flip transition-snapshot allocation**: the outgoing slide is held by pinning its existing cache entry instead of copying it into a fresh full-buffer `ebiten.Image` per page change.
 - **Linux multi-monitor fullscreen placement**: monitor selection is now re-applied after the window exists and before every fullscreen entry, including the `f` key toggle. This keeps `--monitor` and `--presenter-monitor` tied to the selected displays instead of letting the window manager/fullscreen transition fall back to the primary screen.
 - **PowerPoint notes extraction**: notes-page slide-number placeholders are ignored so empty note pages do not produce entries like `notes = "17"`.
 

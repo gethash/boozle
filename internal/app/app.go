@@ -5,6 +5,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"os"
@@ -27,10 +28,21 @@ import (
 var ErrQuit = errors.New("boozle: quit")
 
 const (
-	// cacheCap holds current ± 2 plus a few for monitor / resize variation.
-	cacheCap = 8
+	// Cache budgets are sized at runtime by autoBudget(bufW, bufH) — see
+	// onLayoutChanged. The constants here are floor/ceiling and the initial
+	// value used before Layout has run.
+	cacheBudgetMin    = 32 << 20  // 32 MB floor (small windows)
+	cacheBudgetMax    = 512 << 20 // 512 MB ceiling (multi-4K)
+	cacheBudgetPages  = 6         // target ~6 pages worth at current bufW×bufH
+	cacheBudgetInitial = cacheBudgetMin
+
 	// prefetchQueue is bounded so input spam doesn't pile up work.
-	prefetchQueue = 4
+	prefetchQueue = 8
+
+	// maxUploadsPerFrame caps GPU upload work done on the main goroutine
+	// each tick to keep frame budget. Each upload is a NewImage+WritePixels
+	// pair (~1–3 ms on 4K).
+	maxUploadsPerFrame = 2
 
 	presenterCmdQuit       = "quit"
 	presenterCmdEscape     = "escape"
@@ -67,7 +79,7 @@ func Run(cfg config.Config) error {
 		return fmt.Errorf("no pages to play (page count = %d, --pages = %v)", doc.PageCount(), cfg.PageRange)
 	}
 
-	cache := pdf.NewCache(cacheCap)
+	cache := pdf.NewCache(cacheBudgetInitial)
 	defer cache.Clear()
 
 	pf := pdf.NewPrefetcher(doc, cache, prefetchQueue)
@@ -210,7 +222,9 @@ type Game struct {
 	digitBuf string // numeric-jump input buffer, e.g. "12" → Enter → page 12
 
 	display       *ebiten.Image
-	displayKey    pdf.CacheKey
+	displayKey    pdf.CacheKey // exact key currently backing g.display (zero if mipmap-reused)
+	displayWanted pdf.CacheKey // last requested key — distinguishes "exact" from "stand-in"
+	displayPinned bool         // true while the cache entry at displayKey is Pin'd
 	displayBounds renderBounds
 
 	blackout, whiteout bool // visual blank-out states (mutually exclusive)
@@ -218,10 +232,13 @@ type Game struct {
 	bufW, bufH int // pixel-resolution buffer dimensions
 
 	prevListIdx      int // last position before navigation, for L key
+	lastNavDir       int // +1 / -1 / 0 — biases prefetch order
 	lastCursorX      int
 	lastCursorY      int
 	cursorIdleFrames int
 	quit             bool // set by advance() when --autoquit fires
+
+	pageLabel pageLabelCache // cached fmt.Sprintf for the bottom-right counter
 
 	trans         transition
 	ov            overview
@@ -229,13 +246,39 @@ type Game struct {
 	presenterCmds <-chan ipc.PresenterCommand
 }
 
-type renderBounds struct{ dstX, dstY, dstW, dstH int }
+// renderBounds describes how to position and scale a rendered slide on the
+// screen. dstX/dstY are pixel offsets; dstW/dstH are the on-screen size;
+// srcW/srcH are the actual source-image dimensions (may differ from dst*
+// when serving a larger cached image during a resize, which is then
+// linearly downsampled by Ebiten).
+type renderBounds struct {
+	dstX, dstY, dstW, dstH int
+	srcW, srcH             int
+}
+
+// pageLabelCache memoises the "12 / 84"-style page counter so we don't
+// rebuild the string in fmt.Sprintf on every Draw call.
+type pageLabelCache struct {
+	listIdx int
+	total   int
+	s       string
+}
+
+func (p *pageLabelCache) String(listIdx, total int) string {
+	if p.s == "" || p.listIdx != listIdx || p.total != total {
+		p.listIdx = listIdx
+		p.total = total
+		p.s = fmt.Sprintf("%d / %d", listIdx+1, total)
+	}
+	return p.s
+}
 
 // Update processes input and re-rasterizes when the page or buffer changes.
 func (g *Game) Update() error {
 	if g.quit {
 		return ErrQuit
 	}
+	g.drainPendingUploads()
 	presenterCmds := g.drainPresenterCommands()
 
 	// Auto-hide cursor after ~3 s of inactivity.
@@ -320,6 +363,7 @@ func (g *Game) Update() error {
 
 // Draw renders the current frame.
 func (g *Game) Draw(screen *ebiten.Image) {
+	resetTextPool()
 	switch {
 	case g.blackout:
 		screen.Fill(color.RGBA{0, 0, 0, 255})
@@ -334,7 +378,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.drawTransition(screen)
 		} else {
 			op := &ebiten.DrawImageOptions{}
+			applyDisplayScale(&op.GeoM, g.displayBounds)
 			op.GeoM.Translate(float64(g.displayBounds.dstX), float64(g.displayBounds.dstY))
+			op.Filter = ebiten.FilterLinear
 			screen.DrawImage(g.display, op)
 		}
 	}
@@ -359,9 +405,44 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	}
 	pxW := int(math.Round(float64(outsideWidth) * sf))
 	pxH := int(math.Round(float64(outsideHeight) * sf))
-	g.bufW = pxW
-	g.bufH = pxH
+	if pxW != g.bufW || pxH != g.bufH {
+		g.bufW = pxW
+		g.bufH = pxH
+		g.onLayoutChanged()
+	}
 	return pxW, pxH
+}
+
+// onLayoutChanged is called when the pixel buffer dimensions change (window
+// resize or DPI/monitor swap). It auto-sizes the cache budget and proactively
+// purges entries whose dimensions exceed the new buffer — those are the
+// ones most likely to become stale and waste GPU memory.
+func (g *Game) onLayoutChanged() {
+	if g.cache == nil || g.bufW <= 0 || g.bufH <= 0 {
+		return
+	}
+	g.cache.Resize(autoBudget(g.bufW, g.bufH))
+	// PurgeNotMatching keeps smaller-or-equal entries: those serve as
+	// linearly-downsampled stand-ins via the mipmap-reuse path until the
+	// prefetcher catches up at the new resolution.
+	g.cache.PurgeNotMatching(g.bufW, g.bufH)
+}
+
+// autoBudget sizes the GPU image cache to hold ~6 full-buffer pages, with
+// a sensible floor for small windows and a ceiling for multi-4K setups.
+func autoBudget(bufW, bufH int) int {
+	if bufW <= 0 || bufH <= 0 {
+		return cacheBudgetMin
+	}
+	perPage := bufW * bufH * 4
+	budget := perPage * cacheBudgetPages
+	if budget < cacheBudgetMin {
+		return cacheBudgetMin
+	}
+	if budget > cacheBudgetMax {
+		return cacheBudgetMax
+	}
+	return budget
 }
 
 func (g *Game) currentPage() int { return g.pageList[g.listIdx] }
@@ -535,7 +616,8 @@ func (g *Game) advance(delta int) {
 	if len(g.pageList) == 0 {
 		return
 	}
-	g.beginTransition(sign(delta))
+	g.lastNavDir = sign(delta)
+	g.beginTransition(g.lastNavDir)
 	next := g.listIdx + delta
 	switch {
 	case next < 0:
@@ -578,8 +660,14 @@ func (g *Game) jumpTo1Indexed(n int) {
 	g.listIdx = len(g.pageList) - 1
 }
 
-// maybeRefreshDisplay swaps in the current page's rendered image when
-// the page or pixel buffer changes. On miss it renders synchronously.
+// maybeRefreshDisplay swaps in the current page's rendered image when the
+// page or pixel buffer changes. Cache hits are pointer swaps (no upload);
+// misses fall back to a synchronous render + WritePixels on the main thread.
+//
+// During a resize/DPI change the cache may not have an entry at the new
+// dimensions yet; rather than block on a fresh PDFium render, we look for a
+// larger same-page entry and let Ebiten linearly downsample it. The prefetcher
+// then renders the exact-size version which lands a frame or two later.
 func (g *Game) maybeRefreshDisplay() error {
 	pageIdx := g.currentPage()
 	page, err := g.doc.PageSize(pageIdx)
@@ -590,45 +678,175 @@ func (g *Game) maybeRefreshDisplay() error {
 	if w <= 0 || h <= 0 {
 		return nil
 	}
-	key := pdf.CacheKey{Page: pageIdx, W: w, H: h}
-	if g.display != nil && g.displayKey == key {
+	requestKey := pdf.CacheKey{Page: pageIdx, W: w, H: h}
+	g.displayWanted = requestKey
+
+	// Fast path: g.display already shows the exact requested key.
+	if g.display != nil && g.displayKey == requestKey {
 		return nil
 	}
 
-	rgba, ok := g.cache.Get(key)
-	if !ok {
-		img, cleanup, err := g.doc.RenderPage(key.Page, key.W, key.H)
-		if err != nil {
-			return err
-		}
-		g.cache.Put(key, img, cleanup)
-		rgba = img
+	// Exact cache hit — pointer swap, no upload.
+	if cached, ok := g.cache.Get(requestKey); ok {
+		g.adoptDisplay(cached.(*ebiten.Image), requestKey,
+			renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: w, srcH: h})
+		return nil
 	}
 
-	eimg := ebiten.NewImageFromImage(rgba)
-	if g.display != nil {
-		g.display.Deallocate()
+	// Mipmap reuse: any cached entry for the same page at ≥requested size and
+	// matching aspect can be downsampled by Ebiten while we wait for the
+	// prefetcher to render the exact-size version.
+	if mipKey, ok := g.findScalable(requestKey); ok {
+		if cached, ok := g.cache.Get(mipKey); ok {
+			g.adoptDisplay(cached.(*ebiten.Image), mipKey,
+				renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: mipKey.W, srcH: mipKey.H})
+			g.prefetcher.Request(requestKey)
+			return nil
+		}
 	}
-	g.display = eimg
-	g.displayKey = key
-	g.displayBounds = renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h}
+
+	// Cache miss: render synchronously, upload, insert.
+	img, cleanup, err := g.doc.RenderPage(requestKey.Page, requestKey.W, requestKey.H)
+	if err != nil {
+		return err
+	}
+	eimg := uploadRGBA(img)
+	if cleanup != nil {
+		cleanup()
+	}
+	g.cache.Put(requestKey, eimg)
+	b := img.Bounds()
+	g.adoptDisplay(eimg, requestKey,
+		renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: b.Dx(), srcH: b.Dy()})
 	return nil
 }
 
-// prefetchNeighbors pushes render hints for the +1 / -1 / +2 neighbors.
-// Drops are silent: the prefetcher's queue is bounded.
+// adoptDisplay swaps g.display to a new cache-owned image, pinning the new
+// entry so it cannot be evicted while displayed (and unpinning the old one).
+// All cleanup of the previous image is the cache's responsibility.
+func (g *Game) adoptDisplay(eimg *ebiten.Image, key pdf.CacheKey, bounds renderBounds) {
+	if g.displayPinned && g.cache != nil {
+		g.cache.Unpin(g.displayKey)
+		g.displayPinned = false
+	}
+	g.display = eimg
+	g.displayKey = key
+	g.displayBounds = bounds
+	if g.cache != nil && key != (pdf.CacheKey{}) {
+		g.cache.Pin(key)
+		g.displayPinned = true
+	}
+}
+
+// findScalable scans the cache for an entry of the same page with both
+// dimensions ≥ the requested size and a near-identical aspect ratio. Used
+// only during a transient resize to avoid blocking on PDFium for one frame.
+func (g *Game) findScalable(req pdf.CacheKey) (pdf.CacheKey, bool) {
+	if req.W <= 0 || req.H <= 0 {
+		return pdf.CacheKey{}, false
+	}
+	wantAspect := float64(req.W) / float64(req.H)
+	var best pdf.CacheKey
+	bestArea := 0
+	g.cache.Range(func(k pdf.CacheKey) {
+		if k.Page != req.Page || k.W < req.W || k.H < req.H {
+			return
+		}
+		gotAspect := float64(k.W) / float64(k.H)
+		if math.Abs(gotAspect-wantAspect)/wantAspect > 0.005 {
+			return
+		}
+		// Prefer the smallest-area scalable entry — closest to native res.
+		area := k.W * k.H
+		if best.W == 0 || area < bestArea {
+			best = k
+			bestArea = area
+		}
+	})
+	return best, best.W != 0
+}
+
+// uploadRGBA creates a fresh GPU image at rgba's actual bounds and uploads
+// the pixel data via WritePixels (faster than NewImageFromImage on big buffers).
+func uploadRGBA(rgba *image.RGBA) *ebiten.Image {
+	b := rgba.Bounds()
+	eimg := ebiten.NewImage(b.Dx(), b.Dy())
+	eimg.WritePixels(rgba.Pix)
+	return eimg
+}
+
+// drainPendingUploads moves prefetcher-rendered RGBA pixels onto the GPU
+// (this must happen on the main goroutine for Ebiten) and inserts them
+// into the cache. Bounded per frame to keep latency in check.
+func (g *Game) drainPendingUploads() {
+	if g.prefetcher == nil {
+		return
+	}
+	uploads := g.prefetcher.Uploads()
+	for i := 0; i < maxUploadsPerFrame; i++ {
+		select {
+		case job := <-uploads:
+			if g.cache.Has(job.Key) {
+				// A synchronous render on the main thread already cached this
+				// key while the prefetcher had it in flight — drop the dupe.
+				if job.Cleanup != nil {
+					job.Cleanup()
+				}
+				if job.Done != nil {
+					job.Done()
+				}
+				continue
+			}
+			eimg := uploadRGBA(job.RGBA)
+			if job.Cleanup != nil {
+				job.Cleanup()
+			}
+			g.cache.Put(job.Key, eimg)
+			if job.Done != nil {
+				job.Done()
+			}
+		default:
+			return
+		}
+	}
+}
+
+// applyDisplayScale multiplies the GeoM by the source-to-destination ratio
+// when serving a cached image at a different size than the requested layout
+// (the mipmap-reuse path). When source == destination, this is a no-op.
+func applyDisplayScale(g *ebiten.GeoM, b renderBounds) {
+	if b.srcW <= 0 || b.srcH <= 0 || (b.srcW == b.dstW && b.srcH == b.dstH) {
+		return
+	}
+	sx := float64(b.dstW) / float64(b.srcW)
+	sy := float64(b.dstH) / float64(b.srcH)
+	g.Scale(sx, sy)
+}
+
+// prefetchNeighbors pushes render hints for the next few neighbors, ordered
+// by recent navigation direction so forward marches keep the queue ahead of
+// the user. Drops are silent: the prefetcher's queue is bounded.
 func (g *Game) prefetchNeighbors() {
 	if len(g.pageList) <= 1 {
 		return
 	}
-	for _, delta := range []int{1, -1, 2} {
+	var deltas []int
+	switch {
+	case g.lastNavDir > 0:
+		deltas = []int{1, 2, 3, -1}
+	case g.lastNavDir < 0:
+		deltas = []int{-1, -2, -3, 1}
+	default:
+		deltas = []int{1, -1}
+	}
+	for _, delta := range deltas {
 		idx := g.listIdx + delta
 		switch {
 		case idx < 0:
 			if !g.cfg.Loop {
 				continue
 			}
-			idx = len(g.pageList) - 1
+			idx = (idx%len(g.pageList) + len(g.pageList)) % len(g.pageList)
 		case idx >= len(g.pageList):
 			if !g.cfg.Loop {
 				continue

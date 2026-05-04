@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"sort"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -15,6 +16,12 @@ import (
 const (
 	ovEnterFrames = 25
 	ovExitFrames  = 18
+
+	overviewMaxThumbPixels       = 180
+	overviewThumbQueue           = 64
+	overviewThumbsPerSelection   = 32
+	overviewBackgroundPerFrame   = 4
+	overviewThumbNeighborhoodRow = 2
 )
 
 type ovPhase int
@@ -42,7 +49,10 @@ type overview struct {
 	gridY     int
 	thumbs    []*ebiten.Image // indexed by listIdx; nil = not yet loaded
 	thumbCh   chan thumbLoad
+	thumbReq  chan int
 	thumbStop chan struct{}
+	requested []bool
+	nextThumb int
 	fromIdx   int // listIdx when overview was opened
 	selIdx    int // keyboard-selected cell (list index)
 	exitToIdx int // destination when closing
@@ -135,6 +145,13 @@ func lerpF(a, b, t float64) float64 {
 	return a + (b-a)*t
 }
 
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // openOverview initialises overview mode and kicks off thumbnail loading.
 func (g *Game) openOverview() {
 	n := len(g.pageList)
@@ -148,8 +165,11 @@ func (g *Game) openOverview() {
 		gridX:     gridX,
 		gridY:     gridY,
 		thumbs:    make([]*ebiten.Image, n),
-		thumbCh:   make(chan thumbLoad, n),
+		thumbCh:   make(chan thumbLoad, overviewThumbQueue),
+		thumbReq:  make(chan int, overviewThumbQueue),
 		thumbStop: make(chan struct{}),
+		requested: make([]bool, n),
+		nextThumb: 0,
 		fromIdx:   g.listIdx,
 		selIdx:    g.listIdx,
 		exitToIdx: g.listIdx,
@@ -157,39 +177,164 @@ func (g *Game) openOverview() {
 	}
 	g.ov.initMx, g.ov.initMy = ebiten.CursorPosition()
 	g.startThumbLoader()
+	g.requestOverviewThumbnails(g.listIdx)
 }
 
-// startThumbLoader renders every slide at thumbnail size on a background
-// goroutine and sends the results on thumbCh. Captures all values by value so
-// zeroing g.ov later is safe.
+// startThumbLoader renders requested slides at capped thumbnail size on a
+// background goroutine. Captures all values by value so zeroing g.ov later is safe.
 func (g *Game) startThumbLoader() {
 	thumbStop := g.ov.thumbStop
 	thumbCh := g.ov.thumbCh
+	thumbReq := g.ov.thumbReq
 	pageList := g.pageList
 	doc := g.doc
-	w := max(1, int(math.Round(g.ov.cellW)))
-	h := max(1, int(math.Round(g.ov.cellH)))
+	w := max(1, min(overviewMaxThumbPixels, int(math.Round(g.ov.cellW))))
+	h := max(1, min(overviewMaxThumbPixels, int(math.Round(g.ov.cellH))))
 	go func() {
-		for i, pageIdx := range pageList {
+		for {
 			select {
 			case <-thumbStop:
 				return
-			default:
-			}
-			rgba, cleanup, err := doc.RenderPage(pageIdx, w, h)
-			if err != nil {
-				continue
-			}
-			eimg := ebiten.NewImageFromImage(rgba)
-			cleanup()
-			select {
-			case thumbCh <- thumbLoad{i, eimg}:
-			case <-thumbStop:
-				eimg.Deallocate()
-				return
+			case i := <-thumbReq:
+				if i < 0 || i >= len(pageList) {
+					continue
+				}
+				pageIdx := pageList[i]
+				rgba, cleanup, err := doc.RenderPage(pageIdx, w, h)
+				if err != nil {
+					continue
+				}
+				eimg := ebiten.NewImageFromImage(rgba)
+				cleanup()
+				select {
+				case thumbCh <- thumbLoad{i, eimg}:
+				case <-thumbStop:
+					eimg.Deallocate()
+					return
+				}
 			}
 		}
 	}()
+}
+
+func (g *Game) requestOverviewThumbnails(center int) {
+	ov := &g.ov
+	for _, idx := range overviewLoadOrder(len(g.pageList), center, ov.fromIdx, ov.cols) {
+		ok, stopped := g.requestOverviewThumbnail(idx)
+		if stopped {
+			return
+		}
+		if !ok {
+			return
+		}
+	}
+}
+
+func (g *Game) requestMoreOverviewThumbnails(limit int) {
+	ov := &g.ov
+	if limit <= 0 || len(g.pageList) == 0 {
+		return
+	}
+	queued := 0
+	scanned := 0
+	for queued < limit && scanned < len(g.pageList) {
+		idx := ov.nextThumb
+		ov.nextThumb = (ov.nextThumb + 1) % len(g.pageList)
+		scanned++
+		ok, stopped := g.requestOverviewThumbnail(idx)
+		if stopped || !ok {
+			return
+		}
+		queued++
+	}
+}
+
+func (g *Game) requestOverviewThumbnail(idx int) (queued bool, stopped bool) {
+	ov := &g.ov
+	if idx < 0 || idx >= len(ov.requested) || ov.requested[idx] {
+		return true, false
+	}
+	if idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
+		return true, false
+	}
+	select {
+	case <-ov.thumbStop:
+		return false, true
+	case ov.thumbReq <- idx:
+		ov.requested[idx] = true
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+func overviewLoadOrder(n, center, include, cols int) []int {
+	if n <= 0 {
+		return nil
+	}
+	center = max(0, min(n-1, center))
+	include = max(0, min(n-1, include))
+	if cols < 1 {
+		cols = 1
+	}
+	seen := make(map[int]struct{}, overviewThumbsPerSelection)
+	add := func(out []int, idx int) []int {
+		if idx < 0 || idx >= n {
+			return out
+		}
+		if _, ok := seen[idx]; ok {
+			return out
+		}
+		seen[idx] = struct{}{}
+		return append(out, idx)
+	}
+
+	out := make([]int, 0, overviewThumbsPerSelection)
+	out = add(out, center)
+	out = add(out, include)
+
+	type candidate struct {
+		idx  int
+		dist int
+	}
+	candidates := make([]candidate, 0, overviewThumbsPerSelection*2)
+	centerRow, centerCol := center/cols, center%cols
+	for row := centerRow - overviewThumbNeighborhoodRow; row <= centerRow+overviewThumbNeighborhoodRow; row++ {
+		if row < 0 {
+			continue
+		}
+		for col := centerCol - overviewThumbNeighborhoodRow; col <= centerCol+overviewThumbNeighborhoodRow; col++ {
+			if col < 0 || col >= cols {
+				continue
+			}
+			idx := row*cols + col
+			if idx >= n {
+				continue
+			}
+			dist := abs(row-centerRow) + abs(col-centerCol)
+			candidates = append(candidates, candidate{idx: idx, dist: dist})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].dist == candidates[j].dist {
+			return candidates[i].idx < candidates[j].idx
+		}
+		return candidates[i].dist < candidates[j].dist
+	})
+	for _, cand := range candidates {
+		out = add(out, cand.idx)
+		if len(out) >= overviewThumbsPerSelection {
+			return out
+		}
+	}
+	for delta := 1; len(out) < overviewThumbsPerSelection && (center-delta >= 0 || center+delta < n); delta++ {
+		out = add(out, center-delta)
+		if len(out) >= overviewThumbsPerSelection {
+			break
+		}
+		out = add(out, center+delta)
+	}
+	return out
 }
 
 // closeOverview signals the thumbnail loader to stop and begins the exit animation.
@@ -211,11 +356,17 @@ thumbDrain:
 		select {
 		case tl := <-ov.thumbCh:
 			if tl.listIdx >= 0 && tl.listIdx < len(ov.thumbs) {
+				if ov.thumbs[tl.listIdx] != nil {
+					ov.thumbs[tl.listIdx].Deallocate()
+				}
 				ov.thumbs[tl.listIdx] = tl.img
 			}
 		default:
 			break thumbDrain
 		}
+	}
+	if ov.phase == ovEntering || ov.phase == ovActive {
+		g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
 	}
 
 	switch ov.phase {
@@ -228,6 +379,7 @@ thumbDrain:
 
 	case ovActive:
 		n := len(g.pageList)
+		prevSel := ov.selIdx
 		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) ||
 			inpututil.IsKeyJustPressed(ebiten.KeyTab) ||
 			presenterCmdPressed(presenterCmds, presenterCmdEscape) ||
@@ -281,6 +433,9 @@ thumbDrain:
 		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && ov.hoverIdx >= 0 {
 			g.closeOverview(ov.hoverIdx)
 			return nil
+		}
+		if ov.selIdx != prevSel {
+			g.requestOverviewThumbnails(ov.selIdx)
 		}
 
 	case ovExiting:

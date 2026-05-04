@@ -1,17 +1,23 @@
 package app
 
-import "github.com/hajimehoshi/ebiten/v2"
+import (
+	"github.com/hajimehoshi/ebiten/v2"
+
+	"github.com/gethash/boozle/internal/pdf"
+)
 
 type transStyle int
 
 const (
 	transNone  transStyle = iota
-	transSlide             // push left/right
-	transFade              // cross-dissolve
+	transSlide            // push left/right
+	transFade             // cross-dissolve
 )
 
 const transFrames = 18 // ~300 ms at 60 fps
 
+// transition holds the outgoing slide while a page-change animation runs.
+// The outgoing image is a *pinned* cache entry — no copy is made.
 type transition struct {
 	style    transStyle // configured default
 	curStyle transStyle // style for the currently active transition
@@ -19,8 +25,12 @@ type transition struct {
 	frame    int
 	frames   int
 	dir      int // +1 forward, -1 backward, 0 non-directional
+
 	prevImg    *ebiten.Image
+	prevKey    pdf.CacheKey
 	prevBounds renderBounds
+	cache      *pdf.Cache
+	pinned     bool
 }
 
 func parseTransStyle(s string) transStyle {
@@ -41,22 +51,32 @@ func (tr *transition) progress() float64 {
 	return clamp01(float64(tr.frame) / float64(tr.frames))
 }
 
-func (tr *transition) capture(src *ebiten.Image, b renderBounds) {
-	if tr.prevImg != nil {
-		tr.prevImg.Deallocate()
-	}
-	w := src.Bounds().Dx()
-	h := src.Bounds().Dy()
-	tr.prevImg = ebiten.NewImage(w, h)
-	tr.prevImg.DrawImage(src, nil)
+// capture pins the previous slide's cache entry so it is safe to draw while
+// the transition runs. Pin is a no-op if prevKey is not in the cache (e.g.
+// the previous frame used mipmap reuse) — in that case we just hold the
+// pointer; the cache is unlikely to evict it within the ~300 ms animation.
+func (tr *transition) capture(prev *ebiten.Image, prevKey pdf.CacheKey, b renderBounds, cache *pdf.Cache) {
+	tr.releasePin()
+	tr.prevImg = prev
+	tr.prevKey = prevKey
 	tr.prevBounds = b
+	tr.cache = cache
+	if cache != nil {
+		cache.Pin(prevKey)
+		tr.pinned = true
+	}
+}
+
+func (tr *transition) releasePin() {
+	if tr.pinned && tr.cache != nil {
+		tr.cache.Unpin(tr.prevKey)
+	}
+	tr.pinned = false
 }
 
 func (tr *transition) clear() {
-	if tr.prevImg != nil {
-		tr.prevImg.Deallocate()
-		tr.prevImg = nil
-	}
+	tr.releasePin()
+	tr.prevImg = nil
 	tr.active = false
 }
 
@@ -69,7 +89,7 @@ func (g *Game) beginTransition(dir int) {
 	if g.trans.active {
 		g.trans.clear()
 	}
-	g.trans.capture(g.display, g.displayBounds)
+	g.trans.capture(g.display, g.displayKey, g.displayBounds, g.cache)
 	g.trans.active = true
 	g.trans.frame = 0
 	g.trans.dir = dir
@@ -91,28 +111,36 @@ func (g *Game) drawTransition(screen *ebiten.Image) {
 		W := float64(g.bufW)
 		// new slide enters from the opposite side
 		newOp := &ebiten.DrawImageOptions{}
+		applyDisplayScale(&newOp.GeoM, g.displayBounds)
 		newOp.GeoM.Translate(
 			float64(g.displayBounds.dstX)-float64(tr.dir)*W*(1-t),
 			float64(g.displayBounds.dstY),
 		)
+		newOp.Filter = ebiten.FilterLinear
 		screen.DrawImage(g.display, newOp)
 		// old slide exits toward dir side
 		oldOp := &ebiten.DrawImageOptions{}
+		applyDisplayScale(&oldOp.GeoM, tr.prevBounds)
 		oldOp.GeoM.Translate(
 			float64(tr.prevBounds.dstX)+float64(tr.dir)*W*t,
 			float64(tr.prevBounds.dstY),
 		)
+		oldOp.Filter = ebiten.FilterLinear
 		screen.DrawImage(tr.prevImg, oldOp)
 
 	case transFade:
 		newOp := &ebiten.DrawImageOptions{}
+		applyDisplayScale(&newOp.GeoM, g.displayBounds)
 		newOp.GeoM.Translate(float64(g.displayBounds.dstX), float64(g.displayBounds.dstY))
 		newOp.ColorScale.ScaleAlpha(float32(t))
+		newOp.Filter = ebiten.FilterLinear
 		screen.DrawImage(g.display, newOp)
 
 		oldOp := &ebiten.DrawImageOptions{}
+		applyDisplayScale(&oldOp.GeoM, tr.prevBounds)
 		oldOp.GeoM.Translate(float64(tr.prevBounds.dstX), float64(tr.prevBounds.dstY))
 		oldOp.ColorScale.ScaleAlpha(float32(1 - t))
+		oldOp.Filter = ebiten.FilterLinear
 		screen.DrawImage(tr.prevImg, oldOp)
 	}
 }

@@ -145,6 +145,71 @@ func TestLayoutHelpers(t *testing.T) {
 	}
 }
 
+func TestOverviewLoadOrderIsBoundedAndPrioritized(t *testing.T) {
+	got := overviewLoadOrder(500, 250, 12, 20)
+	if len(got) == 0 {
+		t.Fatal("overviewLoadOrder returned no thumbnails")
+	}
+	if got[0] != 250 {
+		t.Fatalf("first thumbnail = %d, want selected index 250", got[0])
+	}
+	if len(got) > overviewThumbsPerSelection {
+		t.Fatalf("overviewLoadOrder returned %d thumbnails, want at most %d", len(got), overviewThumbsPerSelection)
+	}
+	foundInclude := false
+	seen := map[int]bool{}
+	for _, idx := range got {
+		if idx < 0 || idx >= 500 {
+			t.Fatalf("thumbnail index %d out of range", idx)
+		}
+		if seen[idx] {
+			t.Fatalf("duplicate thumbnail index %d", idx)
+		}
+		seen[idx] = true
+		if idx == 12 {
+			foundInclude = true
+		}
+	}
+	if !foundInclude {
+		t.Fatal("overviewLoadOrder should include the originating slide")
+	}
+}
+
+func TestOverviewBackgroundRequestsAllSlidesOverTime(t *testing.T) {
+	const total = 97
+	g := &Game{
+		pageList: make([]int, total),
+		ov: overview{
+			thumbReq:  make(chan int, overviewThumbQueue),
+			thumbStop: make(chan struct{}),
+			requested: make([]bool, total),
+		},
+	}
+	for i := range g.pageList {
+		g.pageList[i] = i
+	}
+
+	g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
+	if got := len(g.ov.thumbReq); got != overviewBackgroundPerFrame {
+		t.Fatalf("first background request queued %d thumbnails, want %d", got, overviewBackgroundPerFrame)
+	}
+	for len(g.ov.thumbReq) > 0 {
+		<-g.ov.thumbReq
+	}
+
+	for range total {
+		g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
+		for len(g.ov.thumbReq) > 0 {
+			<-g.ov.thumbReq
+		}
+	}
+	for i, ok := range g.ov.requested {
+		if !ok {
+			t.Fatalf("slide %d was never requested", i)
+		}
+	}
+}
+
 func TestTransitionAndElapsedHelpers(t *testing.T) {
 	if parseTransStyle("slide") != transSlide {
 		t.Fatal("slide should parse to transSlide")

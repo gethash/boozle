@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -34,9 +34,9 @@ type Doc struct {
 
 // Page is the natural size of a PDF page, in PDF points (72 dpi).
 type Page struct {
-	Index         int     // 0-indexed
-	WidthPoints   float64 // page width in points
-	HeightPoints  float64 // page height in points
+	Index        int     // 0-indexed
+	WidthPoints  float64 // page width in points
+	HeightPoints float64 // page height in points
 }
 
 // AspectRatio returns width/height; safe even for zero-height pages.
@@ -65,14 +65,14 @@ func Open(path string) (*Doc, error) {
 		return nil, fmt.Errorf("pdfium instance: %w", err)
 	}
 
-	data, err := os.ReadFile(path)
+	absPath, err := filepath.Abs(path)
 	if err != nil {
 		_ = instance.Close()
 		_ = pool.Close()
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("resolve %s: %w", path, err)
 	}
 
-	open, err := instance.OpenDocument(&requests.OpenDocument{File: &data})
+	open, err := instance.OpenDocument(&requests.OpenDocument{FilePath: &absPath})
 	if err != nil {
 		_ = instance.Close()
 		_ = pool.Close()

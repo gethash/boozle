@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"image/color"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -81,8 +80,9 @@ func (g *Game) drawProgressOverlay(screen *ebiten.Image) {
 	barY := H - float32(segBarBottomPad) - float32(segBarH)
 	drawSegmentedProgress(screen, 0, barY, W, float32(segBarH), n, g.listIdx, g.autoProgressFraction(), g.auto.Paused())
 
-	// Page counter in the bottom-right of the frosted panel.
-	label := fmt.Sprintf("%d / %d", g.listIdx+1, n)
+	// Page counter in the bottom-right of the frosted panel. The string is
+	// memoised so a static slide doesn't allocate a fresh one each frame.
+	label := g.pageLabel.String(g.listIdx, n)
 	ebitenutil.DebugPrintAt(screen, label, int(W)-len(label)*7-6, int(H)-19)
 }
 

@@ -47,6 +47,10 @@ transition = "slide"
 [[page]]
 n    = 3
 auto = "1m"
+notes = """
+Mention the rollout date.
+Pause for questions before moving on.
+"""
 
 [[page]]
 n    = 8

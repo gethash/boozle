@@ -15,18 +15,18 @@ import (
 
 // Flags is the raw input from cobra; zero-values mean "unset".
 type Flags struct {
-	PDFPath         string
-	Auto            time.Duration
-	Loop            bool
-	StartPage       int
-	MonitorIdx      int
-	Pages           string
-	Background      string
-	NoFullscreen    bool
-	ConfigPath      string
-	Progress        bool
-	AutoQuit        bool
-	Transition      string
+	PDFPath          string
+	Auto             time.Duration
+	Loop             bool
+	StartPage        int
+	MonitorIdx       int
+	Pages            string
+	Background       string
+	NoFullscreen     bool
+	ConfigPath       string
+	Progress         bool
+	AutoQuit         bool
+	Transition       string
 	PresenterMonitor int // -1 = disabled
 }
 
@@ -43,6 +43,7 @@ type Config struct {
 
 	// PerPage maps 1-indexed page numbers to per-page auto-advance overrides.
 	PerPage          map[int]time.Duration
+	Notes            map[int]string
 	Progress         bool   // show page-position and auto-advance progress overlay
 	AutoQuit         bool   // quit after the last page instead of stopping
 	Transition       string // slide transition style: "none", "slide", "fade"
@@ -68,8 +69,9 @@ type sidecar struct {
 }
 
 type perPageEntry struct {
-	N    int    `toml:"n"`
-	Auto string `toml:"auto"`
+	N     int    `toml:"n"`
+	Auto  string `toml:"auto"`
+	Notes string `toml:"notes"`
 }
 
 // Load resolves the final Config from flags + optional sidecar TOML.
@@ -87,6 +89,7 @@ func Load(f Flags) (Config, error) {
 		Transition:       f.Transition,
 		PresenterMonitor: f.PresenterMonitor,
 		PerPage:          map[int]time.Duration{},
+		Notes:            map[int]string{},
 	}
 
 	side, sidePath, err := loadSidecar(f.PDFPath, f.ConfigPath)
@@ -135,14 +138,16 @@ func Load(f Flags) (Config, error) {
 			c.PresenterMonitor = *side.PresenterMonitor
 		}
 		for _, e := range side.PerPage {
-			if e.Auto == "" {
-				continue
+			if e.Auto != "" {
+				d, err := time.ParseDuration(e.Auto)
+				if err != nil {
+					return Config{}, fmt.Errorf("%s: page %d: invalid auto %q: %w", sidePath, e.N, e.Auto, err)
+				}
+				c.PerPage[e.N] = d
 			}
-			d, err := time.ParseDuration(e.Auto)
-			if err != nil {
-				return Config{}, fmt.Errorf("%s: page %d: invalid auto %q: %w", sidePath, e.N, e.Auto, err)
+			if strings.TrimSpace(e.Notes) != "" {
+				c.Notes[e.N] = e.Notes
 			}
-			c.PerPage[e.N] = d
 		}
 	}
 

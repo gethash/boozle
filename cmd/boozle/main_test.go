@@ -22,6 +22,7 @@ func TestNoArgsPrintsFriendlyHint(t *testing.T) {
 	for _, want := range []string{
 		"boozle: no PDF given.",
 		"-P, --presenter-monitor <N>",
+		"boozle notes import deck.pptx",
 		"boozle slides.pdf --auto 30s --progress",
 	} {
 		if !strings.Contains(out, want) {
@@ -44,10 +45,30 @@ func TestHelpIncludesReleaseFeatures(t *testing.T) {
 	for _, want := range []string{
 		"--transition",
 		"--presenter-monitor",
+		"notes",
+		"Speaker notes",
 		"Presenter view",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestNotesImportHelpIncludesFlags(t *testing.T) {
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"notes", "import", "--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute notes import --help: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{"--out", "--config", "--force", "file.pptx"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("notes import help missing %q:\n%s", want, text)
 		}
 	}
 }

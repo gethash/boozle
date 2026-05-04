@@ -14,7 +14,8 @@ You have a PDF deck. You want to play it full-screen and have it auto-advance ev
 - **Auto-advance with per-slide overrides.** Default 30 s, page 7 needs a minute, page 3 should fly by — say so in a TOML sidecar.
 - **Slide transitions.** Pages animate in with a lateral push or cross-fade — choose `slide`, `fade`, or `none` via `--transition`.
 - **Progress overlay.** A segmented brand-rainbow page-position bar and auto-advance countdown keep you oriented at a glance.
-- **Presenter view.** Use a second monitor for a speaker display with current slide, next slide, wall clock, elapsed time, slide counter, and matching progress.
+- **Presenter view with speaker notes.** Use a second monitor for a speaker display with current slide, next slide, wall clock, elapsed time, slide counter, matching progress, and per-slide notes from the TOML sidecar.
+- **PowerPoint speaker-note import.** Extract `.pptx` speaker notes once into a standalone `.boozle.toml`, then present with only the PDF plus sidecar.
 - **Slide overview.** Press `Tab` for a framed thumbnail grid with a large selected-slide preview. Navigate with arrow keys or click to jump anywhere.
 - **Resolution-aware.** Pages re-rasterise at native pixel resolution on every monitor — crisp on Retina, 4K, mixed-DPI multi-monitor.
 - **Permissively licensed.** Apache-2.0. Uses Chromium's PDFium (Apache-2.0) via a WebAssembly runtime, so the rendering engine is portable and never needs a system library.
@@ -91,12 +92,40 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `--progress` | `false` | Show page-position bar and auto-advance countdown overlay. |
 | `--autoquit` | `false` | Quit after the last page instead of stopping. |
 | `--transition <style>` | `slide` | Page transition: `slide` (lateral push), `fade` (cross-dissolve), `none` (instant cut). |
-| `-P, --presenter-monitor <N>` | `-1` | Open presenter view on monitor N. Use a different monitor than `--monitor`. |
+| `-P, --presenter-monitor <N>` | `-1` | Open presenter view on monitor N. Use a different monitor than `--monitor`, unless also using `--no-fullscreen` for local testing. |
 | `-M, --list-monitors` | | Print the index, name, and DPI scale of every connected display, then exit. |
 | `--no-fullscreen` | `false` | Run windowed (debugging / dev). |
 | `--config <path>` | _auto_ | Use this TOML sidecar instead of the auto-detected one. |
 | `-h, --help` | | Show help. |
 | `-v, --version` | | Show version. |
+
+### Notes import
+
+PowerPoint speaker notes can be extracted as a one-time preparation step. Boozle does not need the `.pptx` at presentation time; it only reads the generated TOML sidecar next to your PDF, or the sidecar passed with `--config`.
+
+```bash
+# Writes deck.boozle.toml by default:
+boozle notes import deck.pptx
+
+# Choose the sidecar path explicitly:
+boozle notes import deck.pptx --out deck.boozle.toml
+
+# --config is accepted as an alias for --out:
+boozle notes import deck.pptx --config deck.boozle.toml
+
+# Replace an existing generated sidecar:
+boozle notes import deck.pptx --out deck.boozle.toml --force
+```
+
+The importer currently supports modern `.pptx` files. Old binary `.ppt` files should be converted to `.pptx` first. Slides without real speaker notes are omitted; PowerPoint notes-page slide-number placeholders such as `notes = "17"` are ignored.
+
+Generated notes are normal per-page sidecar entries:
+
+```toml
+[[page]]
+n = 6
+notes = "Schnelle Antworten. Wenig Reibung. Hohe Zuversicht."
+```
 
 ### Keybindings
 
@@ -134,6 +163,10 @@ transition = "fade"
 [[page]]
 n    = 3
 auto = "1m"      # this slide needs longer
+notes = """
+Mention the rollout date.
+Pause for questions before moving on.
+"""
 
 [[page]]
 n    = 8
@@ -165,6 +198,13 @@ boozle --list-monitors
 
 # Audience display on monitor 1, presenter view on monitor 0:
 boozle deck.pdf --monitor 1 --presenter-monitor 0
+
+# Test presenter mode on one monitor with two windowed views:
+boozle deck.pdf --no-fullscreen --monitor 0 --presenter-monitor 0
+
+# Extract PowerPoint speaker notes once, then present with only PDF + TOML:
+boozle notes import deck.pptx --out deck.boozle.toml
+boozle deck.pdf --presenter-monitor 0
 ```
 
 ## Build from source
@@ -204,6 +244,7 @@ xvfb-run -a go test -race -count=1 ./...
 - **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) (Chromium's PDF engine) compiled to WebAssembly, run inside [`wazero`](https://github.com/tetratelabs/wazero) — a pure-Go WASM runtime. No native PDFium library, no `.dylib`/`.so`/`.dll` to ship alongside the binary.
 - **Windowing & input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles the fullscreen window, vsync, monitor selection, and HiDPI scale factors.
 - **Presenter view:** the main window stays the source of truth and streams presenter state over a local socket; presenter-window key presses are forwarded back so either display can drive the deck.
+- **Speaker notes:** per-slide notes are read from `[[page]] notes` entries in the TOML sidecar and streamed to the presenter window with the current page state. The `.pptx` importer reads Office Open XML speaker-note parts and writes a regular sidecar, so the PowerPoint file is not needed during playback.
 - **Caching:** an LRU keyed by `(page, pixel-width, pixel-height)` keeps the current and a few neighbour pages rasterised; a background goroutine pre-fetches the next page so auto-advance never stalls on PDFium.
 - **Sidecar:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses the per-PDF config; flags override sidecar values via [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag).
 

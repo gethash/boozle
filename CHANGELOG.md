@@ -5,9 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **PowerPoint speaker-note import**: `boozle notes import <file.pptx>` extracts `.pptx` speaker notes into a standalone Boozle TOML sidecar. Use `--out` or `--config` to choose the output path, and `--force` to replace an existing sidecar. The generated file can be used with the PDF later, so the PowerPoint deck does not need to be carried during presentation.
+- **Presenter notes**: `[[page]] notes = "..."` entries in the TOML sidecar are now loaded and shown in presenter view for the current slide.
+- **One-monitor presenter testing**: `--no-fullscreen --monitor 0 --presenter-monitor 0` now opens both audience and presenter views as windowed views on the same monitor for local testing.
+
 ### Fixed
 
 - **Linux multi-monitor fullscreen placement**: monitor selection is now re-applied after the window exists and before every fullscreen entry, including the `f` key toggle. This keeps `--monitor` and `--presenter-monitor` tied to the selected displays instead of letting the window manager/fullscreen transition fall back to the primary screen.
+- **PowerPoint notes extraction**: notes-page slide-number placeholders are ignored so empty note pages do not produce entries like `notes = "17"`.
 
 ## [1.1.1] — 2026-05-04
 

@@ -43,6 +43,21 @@ func TestInitialIndex(t *testing.T) {
 	}
 }
 
+func TestValidatePresenterMonitorAllowsSameMonitorWindowedOnly(t *testing.T) {
+	err := validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 0})
+	if err == nil {
+		t.Fatal("same monitor fullscreen should fail")
+	}
+	err = validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 0, NoFullscreen: true})
+	if err != nil {
+		t.Fatalf("same monitor with --no-fullscreen should work: %v", err)
+	}
+	err = validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 1})
+	if err != nil {
+		t.Fatalf("different monitors should work: %v", err)
+	}
+}
+
 func TestPresenterCommandHelpers(t *testing.T) {
 	cmds := []ipc.PresenterCommand{
 		{Name: presenterCmdLeft},
@@ -87,7 +102,7 @@ func TestBroadcastStateIncludesPresenterMetadata(t *testing.T) {
 	a := timer.New(10*time.Second, nil)
 	a.Reset(3)
 	g := &Game{
-		cfg:       config.Config{},
+		cfg:       config.Config{Notes: map[int]string{5: "Presenter note"}},
 		auto:      a,
 		pageList:  []int{2, 4, 6},
 		listIdx:   1,
@@ -102,6 +117,9 @@ func TestBroadcastStateIncludesPresenterMetadata(t *testing.T) {
 	}
 	if st.ElapsedSeconds < 89 || st.ElapsedSeconds > 91 {
 		t.Fatalf("ElapsedSeconds = %d, want about 90", st.ElapsedSeconds)
+	}
+	if st.Notes != "Presenter note" {
+		t.Fatalf("Notes = %q, want presenter note", st.Notes)
 	}
 }
 

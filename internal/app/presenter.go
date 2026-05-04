@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -414,6 +415,12 @@ func drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.Presenter
 	barY := float32(barLabelY + 32)
 	barH := float32(max(10, min(18, r.h/34)))
 	drawSegmentedProgress(screen, float32(innerX), barY, float32(innerW), barH, st.Total, st.ListIndex, st.Fraction, st.Paused)
+
+	notesY := int(barY+barH) + gap + 18
+	if st.Notes != "" && notesY < r.y+r.h-28 {
+		drawPresenterText(screen, "NOTES", innerX, notesY, 2, color.RGBA{148, 163, 184, 255})
+		drawWrappedPresenterText(screen, st.Notes, innerX, notesY+30, innerW, r.y+r.h-pad, 2, color.RGBA{226, 232, 240, 255})
+	}
 }
 
 func formatElapsed(seconds int64) string {
@@ -440,6 +447,60 @@ func drawPresenterText(screen *ebiten.Image, s string, x, y, scale int, clr colo
 	op.GeoM.Translate(float64(x), float64(y))
 	op.ColorScale.ScaleWithColor(clr)
 	screen.DrawImage(buf, op)
+}
+
+func drawWrappedPresenterText(screen *ebiten.Image, s string, x, y, maxW, maxY, scale int, clr color.Color) {
+	if s == "" || maxW <= 0 || y >= maxY {
+		return
+	}
+	charW := 7 * scale
+	lineH := 15 * scale
+	maxChars := max(1, maxW/charW)
+	lines := wrapPresenterLines(s, maxChars)
+	for _, line := range lines {
+		if y+lineH > maxY {
+			drawPresenterText(screen, "...", x, y, scale, clr)
+			return
+		}
+		drawPresenterText(screen, line, x, y, scale, clr)
+		y += lineH
+	}
+}
+
+func wrapPresenterLines(s string, maxChars int) []string {
+	var lines []string
+	for _, para := range strings.Split(s, "\n") {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			lines = append(lines, "")
+			continue
+		}
+		line := ""
+		for _, word := range words {
+			for len(word) > maxChars {
+				if line != "" {
+					lines = append(lines, line)
+					line = ""
+				}
+				lines = append(lines, word[:maxChars])
+				word = word[maxChars:]
+			}
+			if line == "" {
+				line = word
+				continue
+			}
+			if len(line)+1+len(word) <= maxChars {
+				line += " " + word
+			} else {
+				lines = append(lines, line)
+				line = word
+			}
+		}
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func drawPresenterGradientText(screen *ebiten.Image, s string, x, y, scale int) {

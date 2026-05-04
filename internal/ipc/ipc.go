@@ -21,6 +21,7 @@ type PresenterState struct {
 	Paused         bool
 	NextPage       int   // 0-indexed next page, or -1 if on the last page
 	ElapsedSeconds int64 // wall-clock seconds since presentation start
+	Notes          string
 }
 
 // PresenterCommand is sent by the presenter window when it has keyboard focus.

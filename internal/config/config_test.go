@@ -84,6 +84,9 @@ presenter_monitor = 2
 [[page]]
 n    = 3
 auto = "1s"
+notes = """
+Talk through the demo.
+"""
 
 [[page]]
 n    = 5
@@ -118,6 +121,9 @@ auto = "2m"
 	}
 	if c.PerPage[3] != 1*time.Second || c.PerPage[5] != 2*time.Minute {
 		t.Errorf("PerPage = %+v, want {3:1s, 5:2m}", c.PerPage)
+	}
+	if c.Notes[3] != "Talk through the demo.\n" {
+		t.Errorf("Notes[3] = %q, want imported notes", c.Notes[3])
 	}
 	if !c.Progress || !c.AutoQuit {
 		t.Errorf("Progress/AutoQuit = %v/%v, want true/true", c.Progress, c.AutoQuit)

@@ -95,11 +95,8 @@ func Run(cfg config.Config) error {
 
 	// ── Presenter view subprocess ─────────────────────────────────────────
 	if cfg.PresenterMonitor >= 0 {
-		if cfg.PresenterMonitor == cfg.MonitorIdx {
-			return fmt.Errorf(
-				"--presenter-monitor %d conflicts with --monitor %d: use different monitors",
-				cfg.PresenterMonitor, cfg.MonitorIdx,
-			)
+		if err := validatePresenterMonitor(cfg); err != nil {
+			return err
 		}
 		socketPath := ipc.SocketPath(os.Getpid())
 		srv, err := ipc.Listen(socketPath)
@@ -185,6 +182,16 @@ func initialIndex(pageList []int, startPage1Based int) int {
 		}
 	}
 	return 0
+}
+
+func validatePresenterMonitor(cfg config.Config) error {
+	if cfg.PresenterMonitor == cfg.MonitorIdx && !cfg.NoFullscreen {
+		return fmt.Errorf(
+			"--presenter-monitor %d conflicts with --monitor %d: use different monitors or pass --no-fullscreen",
+			cfg.PresenterMonitor, cfg.MonitorIdx,
+		)
+	}
+	return nil
 }
 
 // Game implements ebiten.Game.
@@ -404,6 +411,7 @@ func (g *Game) broadcastState() {
 		Paused:         g.auto.Paused(),
 		NextPage:       nextPage,
 		ElapsedSeconds: int64(time.Since(g.startedAt).Seconds()),
+		Notes:          g.cfg.Notes[g.currentPage()+1],
 	}
 	// Drain-then-send so the slave always gets the latest frame, never a stale one.
 	select {

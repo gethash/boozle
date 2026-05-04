@@ -13,6 +13,7 @@ import (
 	"github.com/gethash/boozle/internal/app"
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/display"
+	"github.com/gethash/boozle/internal/pptxnotes"
 )
 
 // Set by goreleaser via -ldflags.
@@ -77,10 +78,15 @@ Keybindings:
   q  Esc                     quit
 
 Presenter view (--presenter-monitor):
-  Same navigation keys work when either display has focus.
+  Same navigation keys work when either display has focus. Speaker notes from
+  [[page]] notes entries are shown in the presenter window.
 
 Monitor selection:
-  Use --list-monitors (-M) to print connected displays and their indices.`,
+  Use --list-monitors (-M) to print connected displays and their indices.
+
+Speaker notes:
+  Use "boozle notes import deck.pptx" to extract PowerPoint speaker notes into
+  a standalone deck.boozle.toml sidecar.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -131,6 +137,8 @@ Monitor selection:
 		},
 	}
 
+	cmd.AddCommand(newNotesCmd())
+
 	cmd.Flags().DurationVarP(&auto, "auto", "a", 0, "advance every duration (e.g. 30s, 1m30s); 0 disables")
 	cmd.Flags().BoolVarP(&loop, "loop", "l", false, "loop back to first page after last")
 	cmd.Flags().IntVarP(&startPage, "start", "s", 1, "start at page N (1-indexed)")
@@ -147,6 +155,53 @@ Monitor selection:
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
 
+	return cmd
+}
+
+func newNotesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "notes",
+		Short: "Work with speaker notes sidecars",
+	}
+	cmd.AddCommand(newNotesImportCmd())
+	return cmd
+}
+
+func newNotesImportCmd() *cobra.Command {
+	var (
+		outPath    string
+		configPath string
+		force      bool
+	)
+	cmd := &cobra.Command{
+		Use:   "import <file.pptx>",
+		Short: "Extract PowerPoint speaker notes into a Boozle TOML sidecar",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if outPath != "" && configPath != "" {
+				return fmt.Errorf("use either --out or --config, not both")
+			}
+			target := outPath
+			if target == "" {
+				target = configPath
+			}
+			if target == "" {
+				target = pptxnotes.DefaultSidecarPath(args[0])
+			}
+			notes, err := pptxnotes.Extract(args[0])
+			if err != nil {
+				return err
+			}
+			if err := pptxnotes.WriteSidecar(target, notes, force); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s with notes for %d slide(s)\n", target, len(notes))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&outPath, "out", "", "output TOML sidecar path (default: <file>.boozle.toml)")
+	cmd.Flags().StringVar(&configPath, "config", "", "output TOML sidecar path; alias for --out")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing TOML sidecar")
 	return cmd
 }
 
@@ -170,6 +225,9 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  boozle slides.pdf --auto 30s --progress")

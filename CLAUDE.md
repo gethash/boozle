@@ -4,7 +4,7 @@ Modern, cross-platform fullscreen PDF presenter with auto-advance. Single-file b
 
 - Module: `github.com/gethash/boozle`
 - License: Apache-2.0 (PDFium attribution in [NOTICE](NOTICE))
-- Go: 1.22+
+- Go: 1.26.2+
 
 ## Build & test
 

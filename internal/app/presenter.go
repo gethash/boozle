@@ -68,9 +68,10 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 	if err := display.PickMonitor(monitorIdx); err != nil {
 		return err
 	}
-	ebiten.SetFullscreen(true)
+	ebiten.SetWindowSize(1280, 800)
 
-	if err := ebiten.RunGame(g); err != nil && !errors.Is(err, ErrQuit) {
+	runGame := &fullscreenOnMonitor{game: g, monitorIdx: monitorIdx}
+	if err := ebiten.RunGame(runGame); err != nil && !errors.Is(err, ErrQuit) {
 		return err
 	}
 	return nil

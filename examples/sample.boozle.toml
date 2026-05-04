@@ -18,7 +18,7 @@ monitor = 0
 
 # Monitor index for the presenter view (current + next slide, timers, clock, progress).
 # Set to a non-negative value to enable. Example: laptop screen = 0, projector = 1.
-# presenter_monitor = 0
+# presenter_monitor = 1
 
 # Restrict playback to this page range. Comma-separated list of pages and
 # inclusive ranges. Omit or set to "" to play the entire deck.

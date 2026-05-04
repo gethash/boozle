@@ -3,6 +3,12 @@
 All notable changes to boozle are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Linux multi-monitor fullscreen placement**: monitor selection is now re-applied after the window exists and before every fullscreen entry, including the `f` key toggle. This keeps `--monitor` and `--presenter-monitor` tied to the selected displays instead of letting the window manager/fullscreen transition fall back to the primary screen.
+
 ## [1.1.1] — 2026-05-04
 
 ### Added
@@ -17,7 +23,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **Presenter view** (`--presenter-monitor`, `-P`): optional second fullscreen window for speaker use, showing the current slide, next-slide preview, slide counter, wall clock, elapsed session timer, and auto-advance timer. It can also be enabled from the TOML sidecar with `presenter_monitor = 0`; the presenter and audience displays must use different monitors.
+- **Presenter view** (`--presenter-monitor`, `-P`): optional second fullscreen window for speaker use, showing the current slide, next-slide preview, slide counter, wall clock, elapsed session timer, and auto-advance timer. It can also be enabled from the TOML sidecar with `presenter_monitor = 1`; the presenter and audience displays must use different monitors.
 - **Slide transitions** (`--transition`): animated page changes with `slide` (lateral push, the default) or `fade` (cross-dissolve). Pass `--transition none` to restore the instant-cut behaviour. The style can also be set in the TOML sidecar with `transition = "fade"`. Non-directional jumps (Home, End, digit+Enter, `l`) always use a fade regardless of the configured style.
 
 ### Fixed

@@ -1,4 +1,4 @@
-// Package ipc provides the Unix-socket channel between the main presentation
+// Package ipc provides the local-socket channel between the main presentation
 // window (master) and the presenter-view subprocess (slave).
 package ipc
 
@@ -30,7 +30,7 @@ type PresenterCommand struct {
 	Arg  int    `json:"arg,omitempty"`
 }
 
-// SocketPath returns the per-process Unix socket path.
+// SocketPath returns the per-process socket path.
 func SocketPath(masterPID int) string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("boozle-presenter-%d.sock", masterPID))
 }
@@ -48,7 +48,7 @@ type Server struct {
 	commands chan PresenterCommand
 }
 
-// Listen creates the Unix socket and returns a ready Server.
+// Listen creates the local socket and returns a ready Server.
 // Any stale socket from a prior crash is removed first.
 func Listen(socketPath string) (*Server, error) {
 	_ = os.Remove(socketPath) // tolerate ENOENT

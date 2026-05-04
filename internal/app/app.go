@@ -114,9 +114,9 @@ func Run(cfg config.Config) error {
 			return fmt.Errorf("resolve executable: %w", err)
 		}
 		cmd := exec.Command(self,
-			cfg.PDFPath,
 			"--monitor", strconv.Itoa(cfg.PresenterMonitor),
 			"--_presenter-socket", socketPath,
+			cfg.PDFPath,
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -144,13 +144,15 @@ func Run(cfg config.Config) error {
 	if err := display.PickMonitor(cfg.MonitorIdx); err != nil {
 		return err
 	}
+	var runGame ebiten.Game = g
 	if cfg.NoFullscreen {
 		ebiten.SetWindowSize(1280, 800)
 	} else {
-		ebiten.SetFullscreen(true)
+		ebiten.SetWindowSize(1280, 800)
+		runGame = &fullscreenOnMonitor{game: g, monitorIdx: cfg.MonitorIdx}
 	}
 
-	if err := ebiten.RunGame(g); err != nil && !errors.Is(err, ErrQuit) {
+	if err := ebiten.RunGame(runGame); err != nil && !errors.Is(err, ErrQuit) {
 		return err
 	}
 	return nil
@@ -284,7 +286,9 @@ func (g *Game) Update() error {
 		g.advance(+1)
 	}
 
-	g.handleNavigation(presenterCmds)
+	if err := g.handleNavigation(presenterCmds); err != nil {
+		return err
+	}
 
 	if g.listIdx != prevIdx {
 		g.auto.Reset(g.currentPage() + 1)
@@ -428,7 +432,7 @@ func (g *Game) autoProgressFraction() float64 {
 
 // handleNavigation reads local and presenter-window input and updates
 // listIdx / digitBuf.
-func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
+func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) error {
 	// Digits accumulate into the jump buffer.
 	for k := ebiten.KeyDigit0; k <= ebiten.KeyDigit9; k++ {
 		if inpututil.IsKeyJustPressed(k) {
@@ -451,7 +455,7 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
 				g.jumpTo1Indexed(n)
 			}
 		}
-		return
+		return nil
 	}
 
 	// Backspace: chip the digit buffer; if empty, go back one page.
@@ -462,7 +466,7 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
 		} else {
 			g.advance(-1)
 		}
-		return
+		return nil
 	}
 
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) ||
@@ -488,7 +492,9 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
 		g.listIdx = len(g.pageList) - 1
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF) || presenterCmdPressed(presenterCmds, presenterCmdFullscreen) {
-		ebiten.SetFullscreen(!ebiten.IsFullscreen())
+		if err := setFullscreenOnMonitor(g.cfg.MonitorIdx, !ebiten.IsFullscreen()); err != nil {
+			return err
+		}
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyL) || presenterCmdPressed(presenterCmds, presenterCmdReturnLast) {
 		g.beginTransition(0)
@@ -502,6 +508,7 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) {
 	} else if wy > 0 {
 		g.advance(-1)
 	}
+	return nil
 }
 
 func (g *Game) appendDigit(n int) {

@@ -129,7 +129,7 @@ bg         = "#0a0a0a"
 progress   = true
 autoquit   = false
 transition = "fade"
-# presenter_monitor = 0
+# presenter_monitor = 1
 
 [[page]]
 n    = 3
@@ -178,7 +178,7 @@ go build -o boozle ./cmd/boozle
 ./boozle --no-fullscreen examples/sample.pdf
 ```
 
-Requirements: Go 1.22+ and a working CGO toolchain (Ebiten links system OpenGL on Linux/Windows and Cocoa/Metal on macOS). On Linux, install:
+Requirements: Go 1.26.2+ and a working CGO toolchain (Ebiten links system OpenGL on Linux/Windows and Cocoa/Metal on macOS). On Linux, install:
 
 ```bash
 sudo apt-get install libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev \
@@ -203,7 +203,7 @@ xvfb-run -a go test -race -count=1 ./...
 
 - **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) (Chromium's PDF engine) compiled to WebAssembly, run inside [`wazero`](https://github.com/tetratelabs/wazero) — a pure-Go WASM runtime. No native PDFium library, no `.dylib`/`.so`/`.dll` to ship alongside the binary.
 - **Windowing & input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles the fullscreen window, vsync, monitor selection, and HiDPI scale factors.
-- **Presenter view:** the main window stays the source of truth and streams presenter state over a local Unix socket; presenter-window key presses are forwarded back so either display can drive the deck.
+- **Presenter view:** the main window stays the source of truth and streams presenter state over a local socket; presenter-window key presses are forwarded back so either display can drive the deck.
 - **Caching:** an LRU keyed by `(page, pixel-width, pixel-height)` keeps the current and a few neighbour pages rasterised; a background goroutine pre-fetches the next page so auto-advance never stalls on PDFium.
 - **Sidecar:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses the per-PDF config; flags override sidecar values via [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag).
 

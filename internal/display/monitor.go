@@ -10,8 +10,9 @@ import (
 )
 
 // PickMonitor selects the n-th monitor (0-indexed) and applies it as the
-// current window's target. It is safe to call before ebiten.RunGame so the
-// presentation opens fullscreen on the right display.
+// current window's target. It can be called before ebiten.RunGame to choose
+// the initial target, and after the window exists before entering fullscreen
+// to keep fullscreen placement on the selected display.
 func PickMonitor(n int) error {
 	monitors := ebiten.AppendMonitors(nil)
 	if n < 0 || n >= len(monitors) {

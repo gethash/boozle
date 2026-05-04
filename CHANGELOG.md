@@ -3,6 +3,16 @@
 All notable changes to boozle are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1] — 2026-05-04
+
+### Added
+
+- **`--list-monitors` / `-M`**: prints the index, name, and DPI scale of every connected display, then exits. Use this to discover which number to pass to `--monitor` and `--presenter-monitor` when you're not sure how your OS has ordered the screens.
+
+### Fixed
+
+- **Multi-monitor placement**: `--monitor 0 --presenter-monitor 1` (and any other combination) now reliably opens each window on the intended display. Previously, monitor 0 was a no-op that delegated placement to the OS — in setups where the OS default was not the primary, both windows landed on the same screen.
+
 ## [1.1.0] — 2026-05-02
 
 ### Added

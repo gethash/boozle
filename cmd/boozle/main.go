@@ -12,11 +12,12 @@ import (
 
 	"github.com/gethash/boozle/internal/app"
 	"github.com/gethash/boozle/internal/config"
+	"github.com/gethash/boozle/internal/display"
 )
 
 // Set by goreleaser via -ldflags.
 var (
-	version = "v1.1.0"
+	version = "v1.1.1"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -52,6 +53,7 @@ func newRootCmd() *cobra.Command {
 		transition       string
 		presenterMonitor int
 		presenterSocket  string // hidden internal flag for the slave subprocess
+		listMonitors     bool
 	)
 
 	cmd := &cobra.Command{
@@ -75,12 +77,20 @@ Keybindings:
   q  Esc                     quit
 
 Presenter view (--presenter-monitor):
-  Same navigation keys work when either display has focus.`,
+  Same navigation keys work when either display has focus.
+
+Monitor selection:
+  Use --list-monitors (-M) to print connected displays and their indices.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if listMonitors {
+				fmt.Fprintln(cmd.OutOrStdout(), "Available monitors:")
+				return display.PrintMonitors()
+			}
+
 			if len(args) == 0 {
 				printNoArgsHint(cmd.ErrOrStderr())
 				return errNoArgs
@@ -133,6 +143,7 @@ Presenter view (--presenter-monitor):
 	cmd.Flags().BoolVar(&autoQuit, "autoquit", false, "quit after the last page instead of stopping")
 	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")
 	cmd.Flags().IntVarP(&presenterMonitor, "presenter-monitor", "P", -1, "monitor index for presenter view (-1 = disabled)")
+	cmd.Flags().BoolVarP(&listMonitors, "list-monitors", "M", false, "list available monitors and exit")
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
 
@@ -156,6 +167,7 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "  -s, --start <N>         start at page N (1-indexed)")
 	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index for slides (0 = primary)")
 	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
+	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
 	fmt.Fprintln(w)

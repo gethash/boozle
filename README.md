@@ -42,7 +42,7 @@ The script detects your OS/arch, fetches the right archive, verifies its SHA-256
 Override defaults with env vars:
 
 ```bash
-BOOZLE_VERSION=v1.1.0 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.1.1 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
@@ -92,6 +92,7 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `--autoquit` | `false` | Quit after the last page instead of stopping. |
 | `--transition <style>` | `slide` | Page transition: `slide` (lateral push), `fade` (cross-dissolve), `none` (instant cut). |
 | `-P, --presenter-monitor <N>` | `-1` | Open presenter view on monitor N. Use a different monitor than `--monitor`. |
+| `-M, --list-monitors` | | Print the index, name, and DPI scale of every connected display, then exit. |
 | `--no-fullscreen` | `false` | Run windowed (debugging / dev). |
 | `--config <path>` | _auto_ | Use this TOML sidecar instead of the auto-detected one. |
 | `-h, --help` | | Show help. |
@@ -158,6 +159,9 @@ boozle deck.pdf
 
 # Smooth fade transition instead of the default push:
 boozle deck.pdf --transition fade
+
+# List connected displays to find the right index:
+boozle --list-monitors
 
 # Audience display on monitor 1, presenter view on monitor 0:
 boozle deck.pdf --monitor 1 --presenter-monitor 0

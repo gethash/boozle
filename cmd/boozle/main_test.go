@@ -53,7 +53,7 @@ func TestHelpIncludesReleaseFeatures(t *testing.T) {
 }
 
 func TestDefaultVersionIsReleaseVersion(t *testing.T) {
-	if version != "v1.1.0" {
-		t.Fatalf("version = %q, want v1.1.0", version)
+	if version != "v1.1.1" {
+		t.Fatalf("version = %q, want v1.1.1", version)
 	}
 }

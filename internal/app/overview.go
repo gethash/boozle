@@ -417,22 +417,30 @@ thumbDrain:
 			g.closeOverview(ov.selIdx)
 			return nil
 		}
-		// Mouse hover hit-test — suppressed until the cursor actually moves after
-		// the overview opens, so tiles aren't highlighted by the resting cursor.
-		mx, my := ebiten.CursorPosition()
-		ov.hoverIdx = -1
-		if mx != ov.initMx || my != ov.initMy {
-			for i := range n {
-				x, y, w, h := ov.cellRect(i)
-				if float64(mx) >= x && float64(mx) < x+w && float64(my) >= y && float64(my) < y+h {
-					ov.hoverIdx = i
-					break
-				}
+		for _, cmd := range presenterCmds {
+			if cmd.Name == presenterCmdOverviewGo && cmd.Arg >= 0 && cmd.Arg < n {
+				g.closeOverview(cmd.Arg)
+				return nil
 			}
 		}
-		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && ov.hoverIdx >= 0 {
-			g.closeOverview(ov.hoverIdx)
-			return nil
+		if g.shouldDrawOverviewOnAudience() {
+			// Mouse hover hit-test — suppressed until the cursor actually moves after
+			// the overview opens, so tiles aren't highlighted by the resting cursor.
+			mx, my := ebiten.CursorPosition()
+			ov.hoverIdx = -1
+			if mx != ov.initMx || my != ov.initMy {
+				for i := range n {
+					x, y, w, h := ov.cellRect(i)
+					if float64(mx) >= x && float64(mx) < x+w && float64(my) >= y && float64(my) < y+h {
+						ov.hoverIdx = i
+						break
+					}
+				}
+			}
+			if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && ov.hoverIdx >= 0 {
+				g.closeOverview(ov.hoverIdx)
+				return nil
+			}
 		}
 		if ov.selIdx != prevSel {
 			g.requestOverviewThumbnails(ov.selIdx)

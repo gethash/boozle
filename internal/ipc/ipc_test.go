@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -27,18 +28,27 @@ func TestPresenterStateAndCommandRoundTrip(t *testing.T) {
 	wantState := PresenterState{
 		Page:           4,
 		ListIndex:      2,
+		PageList:       []int{0, 4, 5, 8},
 		Total:          9,
 		Fraction:       0.75,
 		Paused:         true,
 		NextPage:       5,
 		ElapsedSeconds: 123,
+		Overview: PresenterOverviewState{
+			Active:        true,
+			Phase:         2,
+			Anim:          1,
+			FromIndex:     2,
+			SelectedIndex: 3,
+			ExitToIndex:   3,
+		},
 	}
 
 	deadline := time.Now().Add(time.Second)
 	for {
 		srv.Send(wantState)
 		got := recv.Latest()
-		if got == wantState {
+		if reflect.DeepEqual(got, wantState) {
 			break
 		}
 		if time.Now().After(deadline) {

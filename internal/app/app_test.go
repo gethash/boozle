@@ -132,11 +132,58 @@ func TestBroadcastStateIncludesPresenterMetadata(t *testing.T) {
 	if st.Page != 4 || st.ListIndex != 1 || st.Total != 3 || st.NextPage != 6 {
 		t.Fatalf("state page metadata = %+v, want page=4 index=1 total=3 next=6", st)
 	}
+	if !reflect.DeepEqual(st.PageList, []int{2, 4, 6}) {
+		t.Fatalf("PageList = %v, want [2 4 6]", st.PageList)
+	}
 	if st.ElapsedSeconds < 89 || st.ElapsedSeconds > 91 {
 		t.Fatalf("ElapsedSeconds = %d, want about 90", st.ElapsedSeconds)
 	}
 	if st.Notes != "Presenter note" {
 		t.Fatalf("Notes = %q, want presenter note", st.Notes)
+	}
+}
+
+func TestBroadcastStateIncludesOverviewSnapshot(t *testing.T) {
+	g := &Game{
+		auto:      timer.New(0, nil),
+		pageList:  []int{0, 0, 3, 2},
+		listIdx:   2,
+		startedAt: time.Now(),
+		stateCh:   make(chan ipc.PresenterState, 1),
+		ov: overview{
+			phase:     ovActive,
+			anim:      1,
+			fromIdx:   1,
+			selIdx:    3,
+			exitToIdx: 3,
+		},
+	}
+
+	g.broadcastState()
+	st := <-g.stateCh
+	if !reflect.DeepEqual(st.PageList, []int{0, 0, 3, 2}) {
+		t.Fatalf("PageList = %v, want reordered playback list with duplicates", st.PageList)
+	}
+	if st.Overview != (ipc.PresenterOverviewState{
+		Active:        true,
+		Phase:         int(ovActive),
+		Anim:          1,
+		FromIndex:     1,
+		SelectedIndex: 3,
+		ExitToIndex:   3,
+	}) {
+		t.Fatalf("Overview = %+v", st.Overview)
+	}
+}
+
+func TestAudienceOverviewDrawRouting(t *testing.T) {
+	g := &Game{ov: overview{phase: ovActive}}
+	if !g.shouldDrawOverviewOnAudience() {
+		t.Fatal("single-window mode should draw overview on the audience window")
+	}
+	g.stateCh = make(chan ipc.PresenterState, 1)
+	if g.shouldDrawOverviewOnAudience() {
+		t.Fatal("presenter mode should keep overview off the audience window")
 	}
 }
 

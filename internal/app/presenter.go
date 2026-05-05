@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -48,6 +49,10 @@ type PresenterGame struct {
 	counterCache pageLabelCache
 	elapsedCache elapsedCache
 	clockCache   clockCache
+
+	pageList       []int
+	ov             overview
+	ovBufW, ovBufH int
 }
 
 // elapsedCache memoises the HH:MM:SS string by integer seconds.
@@ -143,11 +148,12 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx, cacheMB int, renderSca
 
 func (g *PresenterGame) Update() error {
 	g.drainPendingUploads()
-	g.forwardInput()
 	st := g.receiver.Latest()
 	if g.bufW > 0 && g.bufH > 0 {
+		g.syncPresenterOverview(st)
 		g.maybeRefreshPanes(st)
 	}
+	g.forwardInput()
 	return nil
 }
 
@@ -184,6 +190,207 @@ func (g *PresenterGame) drainPendingUploads() {
 	}
 }
 
+func (g *PresenterGame) syncPresenterOverview(st ipc.PresenterState) {
+	if !st.Overview.Active || len(st.PageList) == 0 {
+		g.closePresenterOverview()
+		return
+	}
+	if g.ov.phase == ovOff ||
+		g.ovBufW != g.bufW || g.ovBufH != g.bufH ||
+		!slices.Equal(g.pageList, st.PageList) {
+		g.closePresenterOverview()
+		g.openPresenterOverview(st)
+	}
+
+	ov := &g.ov
+	ov.phase = ovPhase(st.Overview.Phase)
+	ov.anim = st.Overview.Anim
+	ov.fromIdx = clampListIndex(st.Overview.FromIndex, len(g.pageList))
+	ov.selIdx = clampListIndex(st.Overview.SelectedIndex, len(g.pageList))
+	ov.exitToIdx = clampListIndex(st.Overview.ExitToIndex, len(g.pageList))
+
+	g.drainPresenterOverviewThumbnails()
+	if ov.phase == ovEntering || ov.phase == ovActive {
+		g.requestMorePresenterOverviewThumbnails(overviewBackgroundPerFrame)
+		g.requestPresenterOverviewThumbnails(ov.selIdx)
+	}
+}
+
+func clampListIndex(idx, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return max(0, min(n-1, idx))
+}
+
+func (g *PresenterGame) openPresenterOverview(st ipc.PresenterState) {
+	n := len(st.PageList)
+	gridX, gridY, cols, _, cellW, cellH, padding := computeOvGrid(n, g.bufW, g.bufH)
+	g.pageList = append([]int(nil), st.PageList...)
+	g.ovBufW = g.bufW
+	g.ovBufH = g.bufH
+	g.ov = overview{
+		phase:     ovPhase(st.Overview.Phase),
+		anim:      st.Overview.Anim,
+		cols:      cols,
+		cellW:     cellW,
+		cellH:     cellH,
+		padding:   padding,
+		gridX:     gridX,
+		gridY:     gridY,
+		thumbs:    make([]*ebiten.Image, n),
+		thumbCh:   make(chan thumbLoad, overviewThumbQueue),
+		thumbReq:  make(chan int, overviewThumbQueue),
+		thumbStop: make(chan struct{}),
+		requested: make([]bool, n),
+		fromIdx:   clampListIndex(st.Overview.FromIndex, n),
+		selIdx:    clampListIndex(st.Overview.SelectedIndex, n),
+		exitToIdx: clampListIndex(st.Overview.ExitToIndex, n),
+		hoverIdx:  -1,
+	}
+	g.ov.initMx, g.ov.initMy = ebiten.CursorPosition()
+	g.startPresenterThumbLoader()
+	g.requestPresenterOverviewThumbnails(g.ov.selIdx)
+}
+
+func (g *PresenterGame) closePresenterOverview() {
+	if g.ov.phase == ovOff {
+		return
+	}
+	if g.ov.thumbStop != nil {
+		close(g.ov.thumbStop)
+	}
+	for _, img := range g.ov.thumbs {
+		if img != nil {
+			img.Deallocate()
+		}
+	}
+	if g.ov.thumbCh != nil {
+		for {
+			select {
+			case tl := <-g.ov.thumbCh:
+				if tl.img != nil {
+					tl.img.Deallocate()
+				}
+			default:
+				g.ov = overview{}
+				g.pageList = nil
+				g.ovBufW, g.ovBufH = 0, 0
+				return
+			}
+		}
+	}
+	g.ov = overview{}
+	g.pageList = nil
+	g.ovBufW, g.ovBufH = 0, 0
+}
+
+func (g *PresenterGame) startPresenterThumbLoader() {
+	thumbStop := g.ov.thumbStop
+	thumbCh := g.ov.thumbCh
+	thumbReq := g.ov.thumbReq
+	pageList := append([]int(nil), g.pageList...)
+	doc := g.doc
+	w := max(1, min(overviewMaxThumbPixels, int(math.Round(g.ov.cellW))))
+	h := max(1, min(overviewMaxThumbPixels, int(math.Round(g.ov.cellH))))
+	go func() {
+		for {
+			select {
+			case <-thumbStop:
+				return
+			case i := <-thumbReq:
+				if i < 0 || i >= len(pageList) {
+					continue
+				}
+				pageIdx := pageList[i]
+				rgba, cleanup, err := doc.RenderPage(pageIdx, w, h)
+				if err != nil {
+					continue
+				}
+				eimg := ebiten.NewImageFromImage(rgba)
+				if cleanup != nil {
+					cleanup()
+				}
+				select {
+				case thumbCh <- thumbLoad{i, eimg}:
+				case <-thumbStop:
+					eimg.Deallocate()
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (g *PresenterGame) drainPresenterOverviewThumbnails() {
+	ov := &g.ov
+	if ov.thumbCh == nil {
+		return
+	}
+thumbDrain:
+	for range 10 {
+		select {
+		case tl := <-ov.thumbCh:
+			if tl.listIdx >= 0 && tl.listIdx < len(ov.thumbs) {
+				if ov.thumbs[tl.listIdx] != nil {
+					ov.thumbs[tl.listIdx].Deallocate()
+				}
+				ov.thumbs[tl.listIdx] = tl.img
+			}
+		default:
+			break thumbDrain
+		}
+	}
+}
+
+func (g *PresenterGame) requestPresenterOverviewThumbnails(center int) {
+	ov := &g.ov
+	for _, idx := range overviewLoadOrder(len(g.pageList), center, ov.fromIdx, ov.cols) {
+		ok, stopped := g.requestPresenterOverviewThumbnail(idx)
+		if stopped || !ok {
+			return
+		}
+	}
+}
+
+func (g *PresenterGame) requestMorePresenterOverviewThumbnails(limit int) {
+	ov := &g.ov
+	if limit <= 0 || len(g.pageList) == 0 {
+		return
+	}
+	queued := 0
+	scanned := 0
+	for queued < limit && scanned < len(g.pageList) {
+		idx := ov.nextThumb
+		ov.nextThumb = (ov.nextThumb + 1) % len(g.pageList)
+		scanned++
+		ok, stopped := g.requestPresenterOverviewThumbnail(idx)
+		if stopped || !ok {
+			return
+		}
+		queued++
+	}
+}
+
+func (g *PresenterGame) requestPresenterOverviewThumbnail(idx int) (queued bool, stopped bool) {
+	ov := &g.ov
+	if idx < 0 || idx >= len(ov.requested) || ov.requested[idx] {
+		return true, false
+	}
+	if idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
+		return true, false
+	}
+	select {
+	case <-ov.thumbStop:
+		return false, true
+	case ov.thumbReq <- idx:
+		ov.requested[idx] = true
+		return true, false
+	default:
+		return false, false
+	}
+}
+
 func (g *PresenterGame) Draw(screen *ebiten.Image) {
 	resetTextPool()
 	st := g.receiver.Latest()
@@ -205,6 +412,9 @@ func (g *PresenterGame) Draw(screen *ebiten.Image) {
 	drawImageInPresenterRect(screen, g.curImg, lo.currentContent)
 	drawImageInPresenterRect(screen, g.nextImg, lo.nextContent)
 	g.drawPresenterStatus(screen, lo.statusPanel, st)
+	if g.ov.phase != ovOff {
+		g.drawPresenterOverview(screen)
+	}
 }
 
 func (g *PresenterGame) Layout(outsideW, outsideH int) (int, int) {
@@ -375,6 +585,22 @@ func (g *PresenterGame) unpinNext() {
 }
 
 func (g *PresenterGame) forwardInput() {
+	if g.ov.phase == ovActive {
+		mx, my := ebiten.CursorPosition()
+		g.ov.hoverIdx = -1
+		if mx != g.ov.initMx || my != g.ov.initMy {
+			for i := range len(g.pageList) {
+				x, y, w, h := g.ov.cellRect(i)
+				if float64(mx) >= x && float64(mx) < x+w && float64(my) >= y && float64(my) < y+h {
+					g.ov.hoverIdx = i
+					break
+				}
+			}
+		}
+		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && g.ov.hoverIdx >= 0 {
+			g.receiver.SendCommand(ipc.PresenterCommand{Name: presenterCmdOverviewGo, Arg: g.ov.hoverIdx})
+		}
+	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyQ) {
 		g.receiver.SendCommand(ipc.PresenterCommand{Name: presenterCmdQuit})
 	}
@@ -501,6 +727,197 @@ func drawImageInPresenterRect(screen, img *ebiten.Image, r presenterRect) {
 	op.GeoM.Translate(float64(r.x+offX), float64(r.y+offY))
 	op.Filter = ebiten.FilterLinear
 	screen.DrawImage(img, op)
+}
+
+func (g *PresenterGame) drawPresenterOverview(screen *ebiten.Image) {
+	ov := &g.ov
+	n := len(g.pageList)
+	if n == 0 {
+		return
+	}
+	var scrimAlpha float64
+	switch ov.phase {
+	case ovEntering:
+		scrimAlpha = lerpF(0, 230, easeInOut(ov.anim))
+	case ovActive:
+		scrimAlpha = 230
+	case ovExiting:
+		scrimAlpha = lerpF(230, 0, easeInOut(ov.anim))
+	}
+	vector.FillRect(screen, 0, 0, float32(g.bufW), float32(g.bufH),
+		color.RGBA{8, 10, 18, uint8(scrimAlpha)}, false)
+
+	lo := computeOverviewLayout(g.bufW, g.bufH)
+	drawPresenterPanel(screen, lo.previewPanel)
+	drawPresenterPanel(screen, lo.gridPanel)
+	drawPresenterText(screen, "SELECTED", lo.previewPanel.x+18, lo.previewPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
+	drawPresenterText(screen, "OVERVIEW", lo.gridPanel.x+18, lo.gridPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
+
+	g.drawPresenterOverviewPreview(screen)
+	for i := range n {
+		g.drawPresenterOverviewTile(screen, i)
+	}
+	if ov.phase == ovActive && ov.selIdx >= 0 && ov.selIdx < n {
+		page1 := g.pageList[ov.selIdx] + 1
+		label := fmt.Sprintf("p. %d / %d", page1, n)
+		drawPresenterText(screen, label, lo.previewPanel.x+18, lo.previewPanel.y+lo.previewPanel.h-32, 2, color.RGBA{248, 250, 252, 220})
+	}
+}
+
+func (g *PresenterGame) drawPresenterOverviewPreview(screen *ebiten.Image) {
+	ov := &g.ov
+	content := computeOverviewLayout(g.bufW, g.bufH).previewContent
+	img := g.presenterOverviewPreviewImage()
+	if img == nil {
+		return
+	}
+	iw := float64(img.Bounds().Dx())
+	ih := float64(img.Bounds().Dy())
+	if iw <= 0 || ih <= 0 {
+		return
+	}
+
+	fitX, fitY, fitW, fitH := imageFitRect(img, content)
+	tx, ty, tw, th := fitX, fitY, fitW, fitH
+	switch ov.phase {
+	case ovEntering:
+		lo := g.presenterLayout()
+		startX, startY, startW, startH := imageFitRect(img, lo.currentContent)
+		localT := easeInOut(clamp01(ov.anim / 0.7))
+		tx = lerpF(startX, fitX, localT)
+		ty = lerpF(startY, fitY, localT)
+		tw = lerpF(startW, fitW, localT)
+		th = lerpF(startH, fitH, localT)
+	case ovExiting:
+		full := presenterRect{x: 0, y: 0, w: g.bufW, h: g.bufH}
+		fullX, fullY, fullW, fullH := imageFitRect(img, full)
+		localT := easeInOut(ov.anim)
+		tx = lerpF(fitX, fullX, localT)
+		ty = lerpF(fitY, fullY, localT)
+		tw = lerpF(fitW, fullW, localT)
+		th = lerpF(fitH, fullH, localT)
+	}
+	if tw < 1 || th < 1 {
+		return
+	}
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Scale(tw/iw, th/ih)
+	op.GeoM.Translate(tx, ty)
+	op.Filter = ebiten.FilterLinear
+	screen.DrawImage(img, op)
+}
+
+func (g *PresenterGame) presenterOverviewPreviewImage() *ebiten.Image {
+	ov := &g.ov
+	idx := ov.selIdx
+	if ov.phase == ovEntering {
+		idx = ov.fromIdx
+	} else if ov.phase == ovExiting {
+		idx = ov.exitToIdx
+	}
+	if idx == ov.fromIdx && g.curImg != nil {
+		return g.curImg
+	}
+	if idx >= 0 && idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
+		return ov.thumbs[idx]
+	}
+	return g.curImg
+}
+
+func imageFitRect(img *ebiten.Image, r presenterRect) (x, y, w, h float64) {
+	iw := img.Bounds().Dx()
+	ih := img.Bounds().Dy()
+	fitW, fitH, offX, offY := presenterAspectFit(float64(iw), float64(ih), r.w, r.h)
+	return float64(r.x + offX), float64(r.y + offY), float64(fitW), float64(fitH)
+}
+
+func (g *PresenterGame) drawPresenterOverviewTile(screen *ebiten.Image, i int) {
+	ov := &g.ov
+	n := len(g.pageList)
+
+	cx, cy, cw, ch := ov.cellRect(i)
+	var tx, ty, tw, th float64
+	alpha := 1.0
+
+	switch ov.phase {
+	case ovEntering:
+		dist := i - ov.fromIdx
+		if dist < 0 {
+			dist = -dist
+		}
+		maxDist := ov.fromIdx
+		if tail := n - 1 - ov.fromIdx; tail > maxDist {
+			maxDist = tail
+		}
+		if maxDist == 0 {
+			maxDist = 1
+		}
+		nd := float64(dist) / float64(maxDist)
+		startT := 0.25 + nd*0.40
+		localT := easeOut(clamp01((ov.anim - startT) / 0.35))
+		tx = lerpF(cx+cw*0.5, cx, localT)
+		ty = lerpF(cy+ch*0.5, cy, localT)
+		tw = lerpF(0, cw, localT)
+		th = lerpF(0, ch, localT)
+		alpha = clamp01(localT * 1.5)
+	case ovActive:
+		tx, ty, tw, th = cx, cy, cw, ch
+	case ovExiting:
+		tx, ty, tw, th = cx, cy, cw, ch
+		alpha = lerpF(1, 0, clamp01(ov.anim*2))
+	}
+	if tw < 1 || th < 1 || alpha <= 0 {
+		return
+	}
+
+	var imgX, imgY, imgW, imgH float64
+	img := ov.thumbs[i]
+	if img != nil {
+		iw := float64(img.Bounds().Dx())
+		ih := float64(img.Bounds().Dy())
+		if iw > 0 && ih > 0 {
+			sc := math.Min(tw/iw, th/ih)
+			imgW = iw * sc
+			imgH = ih * sc
+			imgX = tx + (tw-imgW)/2
+			imgY = ty + (th-imgH)/2
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Scale(sc, sc)
+			op.GeoM.Translate(imgX, imgY)
+			op.ColorScale.ScaleAlpha(float32(alpha))
+			op.Filter = ebiten.FilterLinear
+			screen.DrawImage(img, op)
+		}
+	} else {
+		imgX, imgY, imgW, imgH = tx, ty, tw, th
+		if a := uint8(alpha * 200); a > 0 {
+			vector.FillRect(screen, float32(tx), float32(ty), float32(tw), float32(th),
+				color.RGBA{31, 41, 55, a}, false)
+		}
+	}
+
+	if ov.phase != ovActive || imgW < 1 || imgH < 1 {
+		return
+	}
+	switch {
+	case i == ov.selIdx && i != ov.fromIdx:
+		gradT := float32(0)
+		if n > 1 {
+			gradT = float32(i) / float32(n-1)
+		}
+		drawPresenterOverviewBorder(screen, imgX, imgY, imgW, imgH, 2, rainbowAt(gradT, 255))
+	case i == ov.fromIdx:
+		drawPresenterOverviewBorder(screen, imgX, imgY, imgW, imgH, 2, color.RGBA{180, 180, 180, 160})
+	case i == ov.hoverIdx:
+		drawPresenterOverviewBorder(screen, imgX, imgY, imgW, imgH, 1, color.RGBA{255, 255, 255, 120})
+	}
+}
+
+func drawPresenterOverviewBorder(screen *ebiten.Image, x, y, w, h, bw float64, c color.Color) {
+	vector.FillRect(screen, float32(x), float32(y), float32(w), float32(bw), c, false)
+	vector.FillRect(screen, float32(x), float32(y+h-bw), float32(w), float32(bw), c, false)
+	vector.FillRect(screen, float32(x), float32(y), float32(bw), float32(h), c, false)
+	vector.FillRect(screen, float32(x+w-bw), float32(y), float32(bw), float32(h), c, false)
 }
 
 func (g *PresenterGame) drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.PresenterState) {

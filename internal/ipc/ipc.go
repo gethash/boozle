@@ -16,12 +16,25 @@ import (
 type PresenterState struct {
 	Page           int     // 0-indexed current page
 	ListIndex      int     // 0-indexed position within the active play list
+	PageList       []int   // 0-indexed page numbers in playback order
 	Total          int     // total pages in play list
 	Fraction       float64 // auto-advance progress 0..1 (0 when no auto-advance)
 	Paused         bool
 	NextPage       int   // 0-indexed next page, or -1 if on the last page
 	ElapsedSeconds int64 // wall-clock seconds since presentation start
 	Notes          string
+	Overview       PresenterOverviewState
+}
+
+// PresenterOverviewState mirrors the master's overview session so the
+// presenter process can render it without exposing it on the audience display.
+type PresenterOverviewState struct {
+	Active        bool    `json:"active"`
+	Phase         int     `json:"phase"`
+	Anim          float64 `json:"anim"`
+	FromIndex     int     `json:"from_index"`
+	SelectedIndex int     `json:"selected_index"`
+	ExitToIndex   int     `json:"exit_to_index"`
 }
 
 // PresenterCommand is sent by the presenter window when it has keyboard focus.

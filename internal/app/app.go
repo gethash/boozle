@@ -65,6 +65,7 @@ const (
 	presenterCmdPageDown   = "page-down"
 	presenterCmdPageUp     = "page-up"
 	presenterCmdDigit      = "digit"
+	presenterCmdOverviewGo = "overview-go"
 )
 
 // Run opens the presentation window and blocks until the user quits.
@@ -402,9 +403,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 	}
 	g.drawProgressOverlay(screen)
-	if g.ov.phase != ovOff {
+	if g.shouldDrawOverviewOnAudience() {
 		g.drawOverview(screen)
 	}
+}
+
+func (g *Game) shouldDrawOverviewOnAudience() bool {
+	return g.ov.phase != ovOff && g.stateCh == nil
 }
 
 // Layout returns the buffer size in physical pixels.
@@ -511,12 +516,23 @@ func (g *Game) broadcastState() {
 	st := ipc.PresenterState{
 		Page:           g.currentPage(),
 		ListIndex:      g.listIdx,
+		PageList:       append([]int(nil), g.pageList...),
 		Total:          len(g.pageList),
 		Fraction:       g.autoProgressFraction(),
 		Paused:         g.auto.Paused(),
 		NextPage:       nextPage,
 		ElapsedSeconds: int64(time.Since(g.startedAt).Seconds()),
 		Notes:          g.cfg.Notes[g.currentPage()+1],
+	}
+	if g.ov.phase != ovOff {
+		st.Overview = ipc.PresenterOverviewState{
+			Active:        true,
+			Phase:         int(g.ov.phase),
+			Anim:          g.ov.anim,
+			FromIndex:     g.ov.fromIdx,
+			SelectedIndex: g.ov.selIdx,
+			ExitToIndex:   g.ov.exitToIdx,
+		}
 	}
 	// Drain-then-send so the slave always gets the latest frame, never a stale one.
 	select {

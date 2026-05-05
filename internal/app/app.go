@@ -655,21 +655,19 @@ func (g *Game) appendDigit(n int) {
 	}
 }
 
-// advance moves listIdx by delta, looping if --loop is set, else clamping.
+// advance moves listIdx by delta, looping if --loop is set, else stopping.
 // Sets g.quit when --autoquit fires at the end of the deck.
 func (g *Game) advance(delta int) {
 	if len(g.pageList) == 0 {
 		return
 	}
-	g.lastNavDir = sign(delta)
-	g.beginTransition(g.lastNavDir)
 	next := g.listIdx + delta
 	switch {
 	case next < 0:
 		if g.cfg.Loop {
 			next = len(g.pageList) - 1
 		} else {
-			next = 0
+			return
 		}
 	case next >= len(g.pageList):
 		if g.cfg.Loop {
@@ -678,9 +676,14 @@ func (g *Game) advance(delta int) {
 			g.quit = true
 			return
 		} else {
-			next = len(g.pageList) - 1
+			return
 		}
 	}
+	if next == g.listIdx {
+		return
+	}
+	g.lastNavDir = sign(delta)
+	g.beginTransition(g.lastNavDir)
 	g.prevListIdx = g.listIdx
 	g.listIdx = next
 }

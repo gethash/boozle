@@ -64,6 +64,118 @@ func TestInitialIndex(t *testing.T) {
 	}
 }
 
+func TestAdvanceStopsAtNonLoopBoundaries(t *testing.T) {
+	tests := []struct {
+		name  string
+		start int
+		delta int
+	}{
+		{"left at first slide", 0, -1},
+		{"right at last slide", 2, +1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &Game{
+				pageList:    []int{0, 1, 2},
+				listIdx:     tt.start,
+				prevListIdx: 99,
+				lastNavDir:  42,
+			}
+
+			g.advance(tt.delta)
+
+			if g.listIdx != tt.start {
+				t.Fatalf("listIdx = %d, want unchanged %d", g.listIdx, tt.start)
+			}
+			if g.prevListIdx != 99 {
+				t.Fatalf("prevListIdx = %d, want unchanged 99", g.prevListIdx)
+			}
+			if g.lastNavDir != 42 {
+				t.Fatalf("lastNavDir = %d, want unchanged 42", g.lastNavDir)
+			}
+		})
+	}
+}
+
+func TestAdvanceWrapsWhenLooping(t *testing.T) {
+	tests := []struct {
+		name  string
+		start int
+		delta int
+		want  int
+		dir   int
+	}{
+		{"left from first slide", 0, -1, 2, -1},
+		{"right from last slide", 2, +1, 0, +1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &Game{
+				cfg:      config.Config{Loop: true},
+				pageList: []int{0, 1, 2},
+				listIdx:  tt.start,
+			}
+
+			g.advance(tt.delta)
+
+			if g.listIdx != tt.want {
+				t.Fatalf("listIdx = %d, want %d", g.listIdx, tt.want)
+			}
+			if g.prevListIdx != tt.start {
+				t.Fatalf("prevListIdx = %d, want %d", g.prevListIdx, tt.start)
+			}
+			if g.lastNavDir != tt.dir {
+				t.Fatalf("lastNavDir = %d, want %d", g.lastNavDir, tt.dir)
+			}
+		})
+	}
+}
+
+func TestAdvanceAutoQuitsPastLastPage(t *testing.T) {
+	g := &Game{
+		cfg:         config.Config{AutoQuit: true},
+		pageList:    []int{0, 1, 2},
+		listIdx:     2,
+		prevListIdx: 99,
+		lastNavDir:  42,
+	}
+
+	g.advance(+1)
+
+	if !g.quit {
+		t.Fatal("quit = false, want true")
+	}
+	if g.listIdx != 2 {
+		t.Fatalf("listIdx = %d, want unchanged 2", g.listIdx)
+	}
+	if g.prevListIdx != 99 {
+		t.Fatalf("prevListIdx = %d, want unchanged 99", g.prevListIdx)
+	}
+	if g.lastNavDir != 42 {
+		t.Fatalf("lastNavDir = %d, want unchanged 42", g.lastNavDir)
+	}
+}
+
+func TestAdvanceUpdatesNavigationStateOnMove(t *testing.T) {
+	g := &Game{
+		pageList:    []int{0, 0, 3},
+		listIdx:     0,
+		prevListIdx: 99,
+	}
+
+	g.advance(+1)
+
+	if g.listIdx != 1 {
+		t.Fatalf("listIdx = %d, want 1", g.listIdx)
+	}
+	if g.prevListIdx != 0 {
+		t.Fatalf("prevListIdx = %d, want 0", g.prevListIdx)
+	}
+	if g.lastNavDir != 1 {
+		t.Fatalf("lastNavDir = %d, want 1", g.lastNavDir)
+	}
+}
+
 func TestValidatePresenterMonitorAllowsSameMonitorWindowedOnly(t *testing.T) {
 	err := validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 0})
 	if err == nil {

@@ -81,7 +81,7 @@ Keybindings:
 
 Presenter view (--presenter-monitor):
   Same navigation keys work when either display has focus. Speaker notes from
-  [[page]] notes entries are shown in the presenter window.
+  .boozle.toml or .pdfpc sidecars are shown in the presenter window.
 
 Monitor selection:
   Use --list-monitors (-M) to print connected displays and their indices.
@@ -150,7 +150,7 @@ Speaker notes:
 	cmd.Flags().StringVar(&pages, "pages", "", `restrict to a page range, e.g. "3-7,10"`)
 	cmd.Flags().StringVar(&bg, "bg", "#000000", "background color hex")
 	cmd.Flags().BoolVar(&noFullscreen, "no-fullscreen", false, "windowed mode (debugging)")
-	cmd.Flags().StringVar(&configPath, "config", "", "explicit sidecar config path")
+	cmd.Flags().StringVar(&configPath, "config", "", "explicit sidecar config path (.boozle.toml or .pdfpc)")
 	cmd.Flags().BoolVar(&progress, "progress", false, "show page-position and auto-advance progress overlay")
 	cmd.Flags().BoolVar(&autoQuit, "autoquit", false, "quit after the last page instead of stopping")
 	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")

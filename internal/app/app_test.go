@@ -11,14 +11,31 @@ import (
 )
 
 func TestBuildPageList(t *testing.T) {
-	all := buildPageList(4, config.PageRange{All: true})
+	all := buildPageList(4, config.Config{PageRange: config.PageRange{All: true}})
 	if !reflect.DeepEqual(all, []int{0, 1, 2, 3}) {
 		t.Fatalf("all pages = %v, want [0 1 2 3]", all)
 	}
 
-	filtered := buildPageList(5, config.PageRange{Pages: []int{2, 4, 9}})
+	filtered := buildPageList(5, config.Config{PageRange: config.PageRange{Pages: []int{2, 4, 9}}})
 	if !reflect.DeepEqual(filtered, []int{1, 3}) {
 		t.Fatalf("filtered pages = %v, want [1 3]", filtered)
+	}
+
+	playback := buildPageList(5, config.Config{
+		PageRange:        config.PageRange{All: true},
+		PlaybackPages:    []int{1, 1, 4, 9, 3},
+		UsePlaybackPages: true,
+	})
+	if !reflect.DeepEqual(playback, []int{0, 0, 3, 2}) {
+		t.Fatalf("playback pages = %v, want [0 0 3 2]", playback)
+	}
+
+	emptyPlayback := buildPageList(5, config.Config{
+		PageRange:        config.PageRange{All: true},
+		UsePlaybackPages: true,
+	})
+	if len(emptyPlayback) != 0 {
+		t.Fatalf("empty playback pages = %v, want []", emptyPlayback)
 	}
 }
 

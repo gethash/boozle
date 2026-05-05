@@ -1,8 +1,10 @@
-// Package config merges command-line flags with an optional TOML sidecar
-// (`<file>.boozle.toml`) into a single Config struct used by the app.
+// Package config merges command-line flags with an optional sidecar
+// (`<file>.boozle.toml` or `<file>.pdfpc`) into a single Config struct used by the app.
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +45,11 @@ type Config struct {
 	Background   Color
 	NoFullscreen bool
 
+	// PlaybackPages is an optional 1-indexed playback order imported from a
+	// sidecar format that can encode ordering/hidden pages directly.
+	PlaybackPages    []int
+	UsePlaybackPages bool
+
 	// PerPage maps 1-indexed page numbers to per-page auto-advance overrides.
 	PerPage          map[int]time.Duration
 	Notes            map[int]string
@@ -57,7 +64,8 @@ type Config struct {
 // Color is an RGBA color parsed from a hex string.
 type Color struct{ R, G, B, A uint8 }
 
-// sidecar mirrors the TOML schema. All fields are optional; flags win on conflict.
+// sidecar is the normalized sidecar schema. TOML sidecars populate all fields;
+// pdfpc sidecars populate PlaybackPages and Notes.
 type sidecar struct {
 	Auto             string         `toml:"auto"`
 	Loop             *bool          `toml:"loop"`
@@ -72,6 +80,8 @@ type sidecar struct {
 	CacheMB          *int           `toml:"cache_mb"`
 	RenderScale      *float64       `toml:"render_scale"`
 	PerPage          []perPageEntry `toml:"page"`
+	PlaybackPages    []int          `toml:"-"`
+	HasPlaybackPages bool           `toml:"-"`
 }
 
 type perPageEntry struct {
@@ -80,7 +90,7 @@ type perPageEntry struct {
 	Notes string `toml:"notes"`
 }
 
-// Load resolves the final Config from flags + optional sidecar TOML.
+// Load resolves the final Config from flags + optional sidecar.
 // Precedence: explicit flags > sidecar > defaults.
 func Load(f Flags) (Config, error) {
 	c := Config{
@@ -151,6 +161,10 @@ func Load(f Flags) (Config, error) {
 		if c.RenderScale == 0 && side.RenderScale != nil {
 			c.RenderScale = *side.RenderScale
 		}
+		if side.HasPlaybackPages {
+			c.UsePlaybackPages = true
+			c.PlaybackPages = append(c.PlaybackPages, side.PlaybackPages...)
+		}
 		for _, e := range side.PerPage {
 			if e.Auto != "" {
 				d, err := time.ParseDuration(e.Auto)
@@ -174,6 +188,9 @@ func Load(f Flags) (Config, error) {
 		return Config{}, fmt.Errorf("--pages: %w", err)
 	}
 	c.PageRange = pr
+	if c.UsePlaybackPages && !pr.All {
+		c.PlaybackPages = filterPlaybackPages(c.PlaybackPages, pr)
+	}
 
 	col, err := ParseColor(bgSpec)
 	if err != nil {
@@ -196,24 +213,104 @@ func Load(f Flags) (Config, error) {
 }
 
 func loadSidecar(pdfPath, override string) (*sidecar, string, error) {
-	path := override
-	if path == "" {
-		ext := filepath.Ext(pdfPath)
-		base := strings.TrimSuffix(pdfPath, ext)
-		path = base + ".boozle.toml"
-		if _, err := os.Stat(path); err != nil {
-			return nil, "", nil
-		}
+	path, err := resolveSidecarPath(pdfPath, override)
+	if err != nil || path == "" {
+		return nil, path, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, path, fmt.Errorf("read sidecar %s: %w", path, err)
 	}
+	s, err := parseSidecar(path, data)
+	if err != nil {
+		return nil, path, err
+	}
+	return s, path, nil
+}
+
+func resolveSidecarPath(pdfPath, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	ext := filepath.Ext(pdfPath)
+	base := strings.TrimSuffix(pdfPath, ext)
+	for _, path := range []string{base + ".boozle.toml", base + ".pdfpc"} {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return path, fmt.Errorf("stat sidecar %s: %w", path, err)
+		}
+	}
+	return "", nil
+}
+
+func parseSidecar(path string, data []byte) (*sidecar, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".pdfpc" || (ext != ".toml" && bytes.HasPrefix(bytes.TrimSpace(data), []byte("{"))) {
+		return parsePDFPCSidecar(path, data)
+	}
 	var s sidecar
 	if err := toml.Unmarshal(data, &s); err != nil {
-		return nil, path, fmt.Errorf("parse sidecar %s: %w", path, err)
+		return nil, fmt.Errorf("parse sidecar %s: %w", path, err)
 	}
-	return &s, path, nil
+	return &s, nil
+}
+
+type pdfpcSidecar struct {
+	Format          int         `json:"pdfpcFormat"`
+	DisableMarkdown bool        `json:"disableMarkdown"`
+	Pages           []pdfpcPage `json:"pages"`
+}
+
+type pdfpcPage struct {
+	Idx    int    `json:"idx"`
+	Hidden bool   `json:"hidden"`
+	Note   string `json:"note"`
+}
+
+func parsePDFPCSidecar(path string, data []byte) (*sidecar, error) {
+	var p pdfpcSidecar
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("parse pdfpc sidecar %s: %w", path, err)
+	}
+	if p.Format != 2 {
+		return nil, fmt.Errorf("parse pdfpc sidecar %s: unsupported pdfpcFormat %d", path, p.Format)
+	}
+	if len(p.Pages) == 0 {
+		return nil, fmt.Errorf("parse pdfpc sidecar %s: missing pages", path)
+	}
+
+	s := sidecar{HasPlaybackPages: true}
+	notes := map[int]string{}
+	for i, page := range p.Pages {
+		if page.Idx < 0 {
+			return nil, fmt.Errorf("parse pdfpc sidecar %s: page %d has negative idx %d", path, i, page.Idx)
+		}
+		page1 := page.Idx + 1
+		if strings.TrimSpace(page.Note) != "" {
+			notes[page1] = page.Note
+		}
+		if !page.Hidden {
+			s.PlaybackPages = append(s.PlaybackPages, page1)
+		}
+	}
+	if len(notes) > 0 {
+		s.PerPage = make([]perPageEntry, 0, len(notes))
+		for n, note := range notes {
+			s.PerPage = append(s.PerPage, perPageEntry{N: n, Notes: note})
+		}
+	}
+	return &s, nil
+}
+
+func filterPlaybackPages(pages []int, pr PageRange) []int {
+	out := make([]int, 0, len(pages))
+	for _, n := range pages {
+		if pr.Contains(n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // ParseColor parses #RGB, #RRGGBB, or #RRGGBBAA hex strings.

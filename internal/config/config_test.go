@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,6 +172,128 @@ func TestLoadNoSidecarStillWorks(t *testing.T) {
 	}
 	if c.Background.A != 255 {
 		t.Error("Background should default to opaque black")
+	}
+}
+
+func TestLoadPDFPCSidecar(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "deck.pdfpc")
+	if err := os.WriteFile(sidecar, []byte(`{
+  "pdfpcFormat": 2,
+  "disableMarkdown": false,
+  "pages": [
+    {"idx": 0, "label": 1, "hidden": false, "note": "Intro note"},
+    {"idx": 0, "label": 2, "hidden": false},
+    {"idx": 2, "label": 3, "hidden": true, "note": "Hidden note"},
+    {"idx": 4, "label": 5, "hidden": false, "note": "Final note"}
+  ]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.UsePlaybackPages || !reflect.DeepEqual(c.PlaybackPages, []int{1, 1, 5}) {
+		t.Fatalf("UsePlaybackPages/PlaybackPages = %v/%v, want true/[1 1 5]", c.UsePlaybackPages, c.PlaybackPages)
+	}
+	if c.Notes[1] != "Intro note" || c.Notes[3] != "Hidden note" || c.Notes[5] != "Final note" {
+		t.Fatalf("Notes = %+v, want imported pdfpc notes", c.Notes)
+	}
+}
+
+func TestLoadPDFPCSidecarWithPagesFilter(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "custom.sidecar")
+	if err := os.WriteFile(sidecar, []byte(`{
+  "pdfpcFormat": 2,
+  "pages": [
+    {"idx": 0, "hidden": false},
+    {"idx": 4, "hidden": false},
+    {"idx": 0, "hidden": false},
+    {"idx": 2, "hidden": false}
+  ]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, Pages: "1,5", StartPage: 1, PresenterMonitor: -1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.UsePlaybackPages || !reflect.DeepEqual(c.PlaybackPages, []int{1, 5, 1}) {
+		t.Fatalf("UsePlaybackPages/filtered PlaybackPages = %v/%v, want true/[1 5 1]", c.UsePlaybackPages, c.PlaybackPages)
+	}
+}
+
+func TestLoadTOMLSidecarWinsOverPDFPC(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deck.boozle.toml"), []byte(`pages = "2"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deck.pdfpc"), []byte(`{
+  "pdfpcFormat": 2,
+  "pages": [{"idx": 0, "hidden": false, "note": "pdfpc note"}]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(c.PageRange.Pages, []int{2}) {
+		t.Fatalf("PageRange = %+v, want page 2 from TOML", c.PageRange)
+	}
+	if c.UsePlaybackPages || len(c.PlaybackPages) != 0 {
+		t.Fatalf("UsePlaybackPages/PlaybackPages = %v/%v, want TOML to win", c.UsePlaybackPages, c.PlaybackPages)
+	}
+	if _, ok := c.Notes[1]; ok {
+		t.Fatalf("Notes = %+v, want no pdfpc notes when TOML wins", c.Notes)
+	}
+}
+
+func TestLoadPDFPCSidecarErrors(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"invalid json", `{`, "parse pdfpc sidecar"},
+		{"unsupported format", `{"pdfpcFormat": 1, "pages": [{"idx": 0}]}`, "unsupported pdfpcFormat 1"},
+		{"missing pages", `{"pdfpcFormat": 2}`, "missing pages"},
+		{"negative idx", `{"pdfpcFormat": 2, "pages": [{"idx": -1}]}`, "negative idx"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sidecar := filepath.Join(dir, tt.name+".pdfpc")
+			if err := os.WriteFile(sidecar, []byte(tt.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, StartPage: 1, PresenterMonitor: -1})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }
 

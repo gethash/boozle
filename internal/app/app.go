@@ -75,7 +75,7 @@ func Run(cfg config.Config) error {
 	}
 	defer doc.Close()
 
-	pageList := buildPageList(doc.PageCount(), cfg.PageRange)
+	pageList := buildPageList(doc.PageCount(), cfg)
 	if len(pageList) == 0 {
 		return fmt.Errorf("no pages to play (page count = %d, --pages = %v)", doc.PageCount(), cfg.PageRange)
 	}
@@ -179,13 +179,18 @@ func Run(cfg config.Config) error {
 	return nil
 }
 
-// buildPageList resolves the configured PageRange against the actual page
-// count and returns a slice of 0-indexed page numbers in playback order.
-func buildPageList(total int, pr config.PageRange) []int {
-	pages := pr.Filter(total) // 1-indexed
+// buildPageList resolves the configured playback pages or PageRange against
+// the actual page count and returns 0-indexed page numbers in playback order.
+func buildPageList(total int, cfg config.Config) []int {
+	pages := cfg.PlaybackPages
+	if !cfg.UsePlaybackPages {
+		pages = cfg.PageRange.Filter(total) // 1-indexed
+	}
 	out := make([]int, 0, len(pages))
 	for _, n := range pages {
-		out = append(out, n-1)
+		if n >= 1 && n <= total {
+			out = append(out, n-1)
+		}
 	}
 	return out
 }

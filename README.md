@@ -11,10 +11,10 @@ A modern, cross-platform PDF presenter with an auto-advance timer. Spiritual suc
 You have a PDF deck. You want to play it full-screen and have it auto-advance every N seconds — for a booth, a kiosk, a lobby screen, or just to step through slides hands-free. That's the whole feature set.
 
 - **One file.** No installer, no runtime, no Python. Download a binary, `chmod +x`, run.
-- **Auto-advance with per-slide overrides.** Default 30 s, page 7 needs a minute, page 3 should fly by — say so in a TOML sidecar.
+- **Auto-advance with per-slide overrides.** Default 30 s, page 7 needs a minute, page 3 should fly by — say so in a Boozle TOML sidecar.
 - **Slide transitions.** Pages animate in with a lateral push or cross-fade — choose `slide`, `fade`, or `none` via `--transition`.
 - **Progress overlay.** A segmented brand-rainbow page-position bar and auto-advance countdown keep you oriented at a glance.
-- **Presenter view with speaker notes.** Use a second monitor for a speaker display with current slide, next slide, wall clock, elapsed time, slide counter, matching progress, and per-slide notes from the TOML sidecar.
+- **Presenter view with speaker notes.** Use a second monitor for a speaker display with current slide, next slide, wall clock, elapsed time, slide counter, matching progress, and per-slide notes from `.boozle.toml` or `.pdfpc` sidecars.
 - **PowerPoint speaker-note import.** Extract `.pptx` speaker notes once into a standalone `.boozle.toml`, then present with only the PDF plus sidecar.
 - **Slide overview.** Press `Tab` for a framed thumbnail grid with a large selected-slide preview. Navigate with arrow keys or click to jump anywhere.
 - **Resolution-aware.** Pages re-rasterise at native pixel resolution on every monitor — crisp on Retina, 4K, mixed-DPI multi-monitor.
@@ -97,7 +97,7 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `--no-fullscreen` | `false` | Run windowed (debugging / dev). |
 | `--cache-mb <N>` | `0` | Hard-cap the GPU page cache at N MB. `0` auto-sizes from the active display. |
 | `--render-scale <F>` | `0` | Rasterise pages at fraction `F` of native pixels (`0.5..1.0`). `0` keeps native. Trades a little sharpness for substantially less RAM on big decks / high-DPI displays. |
-| `--config <path>` | _auto_ | Use this TOML sidecar instead of the auto-detected one. |
+| `--config <path>` | _auto_ | Use this sidecar instead of the auto-detected one (`.boozle.toml` or `.pdfpc`). |
 | `-h, --help` | | Show help. |
 | `-v, --version` | | Show version. |
 
@@ -150,7 +150,7 @@ When presenter mode is enabled, the same navigation keys also work when the pres
 
 ### Sidecar configuration (per-PDF)
 
-Create `slides.boozle.toml` next to `slides.pdf`. Command-line flags always win over sidecar values, so the sidecar is a good place for per-deck defaults:
+Create `slides.boozle.toml` next to `slides.pdf`. Boozle also auto-loads `slides.pdfpc` when no Boozle TOML sidecar exists. Command-line flags always win over sidecar values, so the sidecar is a good place for per-deck defaults:
 
 ```toml
 auto       = "30s"
@@ -178,6 +178,8 @@ auto = "5s"      # this one just blips past
 ```
 
 A complete annotated example lives at [examples/sample.boozle.toml](examples/sample.boozle.toml).
+
+pdfpc sidecars are JSON files created by PDF Presenter Console. Boozle imports their `pages` order, skips entries marked `hidden`, preserves duplicate page entries used for overlays, and shows plain-text `note` values in presenter view. pdfpc-specific features such as movies, drawing state, timers, and transition metadata are ignored.
 
 ### Examples
 
@@ -251,9 +253,9 @@ xvfb-run -a go test -race -count=1 ./...
 - **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) (Chromium's PDF engine) compiled to WebAssembly, run inside [`wazero`](https://github.com/tetratelabs/wazero) — a pure-Go WASM runtime. No native PDFium library, no `.dylib`/`.so`/`.dll` to ship alongside the binary.
 - **Windowing & input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles the fullscreen window, vsync, monitor selection, and HiDPI scale factors.
 - **Presenter view:** the main window stays the source of truth and streams presenter state over a local socket; presenter-window key presses are forwarded back so either display can drive the deck.
-- **Speaker notes:** per-slide notes are read from `[[page]] notes` entries in the TOML sidecar and streamed to the presenter window with the current page state. The `.pptx` importer reads Office Open XML speaker-note parts and writes a regular sidecar, so the PowerPoint file is not needed during playback.
+- **Speaker notes:** per-slide notes are read from `[[page]] notes` entries in the TOML sidecar or `note` fields in a `.pdfpc` sidecar and streamed to the presenter window with the current page state. The `.pptx` importer reads Office Open XML speaker-note parts and writes a regular sidecar, so the PowerPoint file is not needed during playback.
 - **Caching:** an LRU keyed by `(page, pixel-width, pixel-height)` keeps the current and a few neighbour pages rasterised; a background goroutine pre-fetches the next page so auto-advance never stalls on PDFium.
-- **Sidecar:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses the per-PDF config; flags override sidecar values via [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag).
+- **Sidecar:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses Boozle TOML config and the standard library parses pdfpc JSON; flags override sidecar values via [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag).
 
 ## License
 

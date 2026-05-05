@@ -207,6 +207,68 @@ func TestLoadSidecarProgressAndAutoQuit(t *testing.T) {
 	}
 }
 
+func TestLoadCacheAndRenderScaleFlags(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, CacheMB: 64, RenderScale: 0.75})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CacheMB != 64 {
+		t.Errorf("CacheMB = %d, want 64", c.CacheMB)
+	}
+	if c.RenderScale != 0.75 {
+		t.Errorf("RenderScale = %v, want 0.75", c.RenderScale)
+	}
+
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, CacheMB: -1}); err == nil {
+		t.Error("negative CacheMB should be rejected")
+	}
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, RenderScale: 0.25}); err == nil {
+		t.Error("RenderScale below 0.5 should be rejected")
+	}
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, RenderScale: 1.5}); err == nil {
+		t.Error("RenderScale above 1.0 should be rejected")
+	}
+}
+
+func TestLoadCacheAndRenderScaleSidecar(t *testing.T) {
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdfPath, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "deck.boozle.toml")
+	if err := os.WriteFile(sidecar, []byte("cache_mb = 96\nrender_scale = 0.8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sidecar fills when no flag provided.
+	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.CacheMB != 96 {
+		t.Errorf("sidecar CacheMB = %d, want 96", c.CacheMB)
+	}
+	if c.RenderScale != 0.8 {
+		t.Errorf("sidecar RenderScale = %v, want 0.8", c.RenderScale)
+	}
+
+	// Explicit flag wins over sidecar.
+	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1, CacheMB: 32, RenderScale: 0.6})
+	if err != nil {
+		t.Fatalf("Load with flags: %v", err)
+	}
+	if c2.CacheMB != 32 || c2.RenderScale != 0.6 {
+		t.Errorf("flags should win: CacheMB=%d RenderScale=%v", c2.CacheMB, c2.RenderScale)
+	}
+}
+
 func TestParseColor(t *testing.T) {
 	tests := []struct {
 		in   string

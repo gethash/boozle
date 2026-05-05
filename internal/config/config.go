@@ -27,7 +27,9 @@ type Flags struct {
 	Progress         bool
 	AutoQuit         bool
 	Transition       string
-	PresenterMonitor int // -1 = disabled
+	PresenterMonitor int     // -1 = disabled
+	CacheMB          int     // 0 = auto-size to display
+	RenderScale      float64 // 0 = native; 0.5..1.0 reduces per-page pixel count
 }
 
 // Config is the resolved configuration the app actually runs with.
@@ -44,10 +46,12 @@ type Config struct {
 	// PerPage maps 1-indexed page numbers to per-page auto-advance overrides.
 	PerPage          map[int]time.Duration
 	Notes            map[int]string
-	Progress         bool   // show page-position and auto-advance progress overlay
-	AutoQuit         bool   // quit after the last page instead of stopping
-	Transition       string // slide transition style: "none", "slide", "fade"
-	PresenterMonitor int    // -1 = disabled; monitor index for the presenter view window
+	Progress         bool    // show page-position and auto-advance progress overlay
+	AutoQuit         bool    // quit after the last page instead of stopping
+	Transition       string  // slide transition style: "none", "slide", "fade"
+	PresenterMonitor int     // -1 = disabled; monitor index for the presenter view window
+	CacheMB          int     // 0 = auto-size to display; otherwise hard cap in MB
+	RenderScale      float64 // 0 = native; 0.5..1.0 fraction of native pixels for renders
 }
 
 // Color is an RGBA color parsed from a hex string.
@@ -65,6 +69,8 @@ type sidecar struct {
 	AutoQuit         *bool          `toml:"autoquit"`
 	Transition       string         `toml:"transition"`
 	PresenterMonitor *int           `toml:"presenter_monitor"`
+	CacheMB          *int           `toml:"cache_mb"`
+	RenderScale      *float64       `toml:"render_scale"`
 	PerPage          []perPageEntry `toml:"page"`
 }
 
@@ -88,6 +94,8 @@ func Load(f Flags) (Config, error) {
 		AutoQuit:         f.AutoQuit,
 		Transition:       f.Transition,
 		PresenterMonitor: f.PresenterMonitor,
+		CacheMB:          f.CacheMB,
+		RenderScale:      f.RenderScale,
 		PerPage:          map[int]time.Duration{},
 		Notes:            map[int]string{},
 	}
@@ -137,6 +145,12 @@ func Load(f Flags) (Config, error) {
 		if c.PresenterMonitor == -1 && side.PresenterMonitor != nil {
 			c.PresenterMonitor = *side.PresenterMonitor
 		}
+		if c.CacheMB == 0 && side.CacheMB != nil {
+			c.CacheMB = *side.CacheMB
+		}
+		if c.RenderScale == 0 && side.RenderScale != nil {
+			c.RenderScale = *side.RenderScale
+		}
 		for _, e := range side.PerPage {
 			if e.Auto != "" {
 				d, err := time.ParseDuration(e.Auto)
@@ -169,6 +183,13 @@ func Load(f Flags) (Config, error) {
 
 	if c.StartPage < 1 {
 		return Config{}, fmt.Errorf("--start must be >= 1, got %d", c.StartPage)
+	}
+
+	if c.CacheMB < 0 {
+		return Config{}, fmt.Errorf("--cache-mb must be >= 0, got %d", c.CacheMB)
+	}
+	if c.RenderScale != 0 && (c.RenderScale < 0.5 || c.RenderScale > 1.0) {
+		return Config{}, fmt.Errorf("--render-scale must be between 0.5 and 1.0 (or 0 for native), got %v", c.RenderScale)
 	}
 
 	return c, nil

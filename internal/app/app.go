@@ -30,10 +30,11 @@ var ErrQuit = errors.New("boozle: quit")
 const (
 	// Cache budgets are sized at runtime by autoBudget(bufW, bufH) — see
 	// onLayoutChanged. The constants here are floor/ceiling and the initial
-	// value used before Layout has run.
-	cacheBudgetMin    = 32 << 20  // 32 MB floor (small windows)
-	cacheBudgetMax    = 512 << 20 // 512 MB ceiling (multi-4K)
-	cacheBudgetPages  = 6         // target ~6 pages worth at current bufW×bufH
+	// value used before Layout has run. The user can override the auto sizing
+	// via --cache-mb (cfg.CacheMB > 0).
+	cacheBudgetMin     = 32 << 20  // 32 MB floor (small windows)
+	cacheBudgetMax     = 192 << 20 // 192 MB ceiling — past this, more pages don't help typical nav
+	cacheBudgetPages   = 4         // target ~4 pages worth at current bufW×bufH
 	cacheBudgetInitial = cacheBudgetMin
 
 	// prefetchQueue is bounded so input spam doesn't pile up work.
@@ -81,6 +82,9 @@ func Run(cfg config.Config) error {
 
 	cache := pdf.NewCache(cacheBudgetInitial)
 	defer cache.Clear()
+	if cfg.CacheMB > 0 {
+		cache.Resize(cfg.CacheMB << 20)
+	}
 
 	pf := pdf.NewPrefetcher(doc, cache, prefetchQueue)
 	pf.Start()
@@ -122,11 +126,18 @@ func Run(cfg config.Config) error {
 		if err != nil {
 			return fmt.Errorf("resolve executable: %w", err)
 		}
-		cmd := exec.Command(self,
+		args := []string{
 			"--monitor", strconv.Itoa(cfg.PresenterMonitor),
 			"--_presenter-socket", socketPath,
-			cfg.PDFPath,
-		)
+		}
+		if cfg.CacheMB > 0 {
+			args = append(args, "--cache-mb", strconv.Itoa(cfg.CacheMB))
+		}
+		if cfg.RenderScale > 0 {
+			args = append(args, "--render-scale", strconv.FormatFloat(cfg.RenderScale, 'f', -1, 64))
+		}
+		args = append(args, cfg.PDFPath)
+		cmd := exec.Command(self, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
@@ -406,6 +417,10 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	}
 	pxW := int(math.Round(float64(outsideWidth) * sf))
 	pxH := int(math.Round(float64(outsideHeight) * sf))
+	if rs := g.cfg.RenderScale; rs > 0 && rs < 1 {
+		pxW = max(1, int(math.Round(float64(pxW)*rs)))
+		pxH = max(1, int(math.Round(float64(pxH)*rs)))
+	}
 	if pxW != g.bufW || pxH != g.bufH {
 		g.bufW = pxW
 		g.bufH = pxH
@@ -422,15 +437,18 @@ func (g *Game) onLayoutChanged() {
 	if g.cache == nil || g.bufW <= 0 || g.bufH <= 0 {
 		return
 	}
-	g.cache.Resize(autoBudget(g.bufW, g.bufH))
+	if g.cfg.CacheMB <= 0 {
+		g.cache.Resize(autoBudget(g.bufW, g.bufH))
+	}
 	// PurgeNotMatching keeps smaller-or-equal entries: those serve as
 	// linearly-downsampled stand-ins via the mipmap-reuse path until the
 	// prefetcher catches up at the new resolution.
 	g.cache.PurgeNotMatching(g.bufW, g.bufH)
 }
 
-// autoBudget sizes the GPU image cache to hold ~6 full-buffer pages, with
-// a sensible floor for small windows and a ceiling for multi-4K setups.
+// autoBudget sizes the GPU image cache to hold ~cacheBudgetPages full-buffer
+// pages, with a sensible floor for small windows and a ceiling for high-DPI
+// setups. The user can override entirely via --cache-mb.
 func autoBudget(bufW, bufH int) int {
 	if bufW <= 0 || bufH <= 0 {
 		return cacheBudgetMin

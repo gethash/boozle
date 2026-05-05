@@ -18,7 +18,7 @@ import (
 
 // Set by goreleaser via -ldflags.
 var (
-	version = "v1.1.1"
+	version = "v1.2.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -55,6 +55,8 @@ func newRootCmd() *cobra.Command {
 		presenterMonitor int
 		presenterSocket  string // hidden internal flag for the slave subprocess
 		listMonitors     bool
+		cacheMB          int
+		renderScale      float64
 	)
 
 	cmd := &cobra.Command{
@@ -111,7 +113,7 @@ Speaker notes:
 
 			// Presenter slave mode: spawned by the master with a hidden flag.
 			if presenterSocket != "" {
-				return app.RunPresenter(presenterSocket, pdfPath, monitorIdx)
+				return app.RunPresenter(presenterSocket, pdfPath, monitorIdx, cacheMB, renderScale)
 			}
 
 			cfg, err := config.Load(config.Flags{
@@ -128,6 +130,8 @@ Speaker notes:
 				AutoQuit:         autoQuit,
 				Transition:       transition,
 				PresenterMonitor: presenterMonitor,
+				CacheMB:          cacheMB,
+				RenderScale:      renderScale,
 			})
 			if err != nil {
 				return err
@@ -152,6 +156,8 @@ Speaker notes:
 	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")
 	cmd.Flags().IntVarP(&presenterMonitor, "presenter-monitor", "P", -1, "monitor index for presenter view (-1 = disabled)")
 	cmd.Flags().BoolVarP(&listMonitors, "list-monitors", "M", false, "list available monitors and exit")
+	cmd.Flags().IntVar(&cacheMB, "cache-mb", 0, "GPU page cache cap in MB (0 = auto-size to display)")
+	cmd.Flags().Float64Var(&renderScale, "render-scale", 0, "render at fraction of native pixels (0.5..1.0; 0 = native)")
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
 

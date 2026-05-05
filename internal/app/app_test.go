@@ -210,6 +210,30 @@ func TestOverviewBackgroundRequestsAllSlidesOverTime(t *testing.T) {
 	}
 }
 
+func TestAutoBudget(t *testing.T) {
+	// Tiny window: clamps to floor.
+	if got := autoBudget(320, 240); got != cacheBudgetMin {
+		t.Errorf("autoBudget(320,240) = %d, want floor %d", got, cacheBudgetMin)
+	}
+
+	// Mid-size: scales with bufW*bufH*4*cacheBudgetPages, clear of both floor and ceiling.
+	const w, h = 3840, 2160
+	want := w * h * 4 * cacheBudgetPages
+	if got := autoBudget(w, h); got != want {
+		t.Errorf("autoBudget(%d,%d) = %d, want %d", w, h, got, want)
+	}
+
+	// Huge buffer: clamps to ceiling.
+	if got := autoBudget(8192, 4608); got != cacheBudgetMax {
+		t.Errorf("autoBudget(8192,4608) = %d, want ceiling %d", got, cacheBudgetMax)
+	}
+
+	// Invalid input returns the floor without panicking.
+	if got := autoBudget(0, 0); got != cacheBudgetMin {
+		t.Errorf("autoBudget(0,0) = %d, want floor %d", got, cacheBudgetMin)
+	}
+}
+
 func TestTransitionAndElapsedHelpers(t *testing.T) {
 	if parseTransStyle("slide") != transSlide {
 		t.Fatal("slide should parse to transSlide")

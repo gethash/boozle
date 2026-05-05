@@ -3,18 +3,20 @@
 All notable changes to boozle are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.2.0] — 2026-05-05
 
 ### Added
 
 - **PowerPoint speaker-note import**: `boozle notes import <file.pptx>` extracts `.pptx` speaker notes into a standalone Boozle TOML sidecar. Use `--out` or `--config` to choose the output path, and `--force` to replace an existing sidecar. The generated file can be used with the PDF later, so the PowerPoint deck does not need to be carried during presentation.
 - **Presenter notes**: `[[page]] notes = "..."` entries in the TOML sidecar are now loaded and shown in presenter view for the current slide.
 - **One-monitor presenter testing**: `--no-fullscreen --monitor 0 --presenter-monitor 0` now opens both audience and presenter views as windowed views on the same monitor for local testing.
+- **`--cache-mb`**: hard-cap the GPU page cache at N MB instead of the auto-sized budget. Useful when the auto sizing is generous for the navigation pattern actually in use. Also available as `cache_mb` in the TOML sidecar.
+- **`--render-scale`**: rasterise pages at a fraction of native pixels (`0.5..1.0`; `0` keeps native). Cuts per-page bytes quadratically and shrinks the PDFium WASM-side bitmaps in the same step — the biggest single lever for memory on large decks / high-DPI displays. Also available as `render_scale` in the TOML sidecar.
 
 ### Changed
 
 - **Render cache stores GPU images, not CPU pixels**: page flips are now a pointer swap into the cache instead of an `ebiten.NewImageFromImage` re-upload of ~32 MB on every navigation. The cache uploads once via `WritePixels`, then PDFium's WASM-side bitmap and the Go-side RGBA copy are released immediately. Result: noticeably snappier flips on Retina/4K and a large drop in steady-state RAM (no more redundant CPU pixel buffers held alongside the GPU textures).
-- **Cache budget is auto-sized to the active display**: replaces the fixed 128 MB constant with a per-Layout budget of ~6 full-buffer pages, floored at 32 MB and capped at 512 MB. Small/laptop windows now use ~30–50 MB; multi-4K setups grow automatically.
+- **Cache budget is auto-sized to the active display**: replaces the fixed 128 MB constant with a per-Layout budget of ~4 full-buffer pages, floored at 32 MB and capped at 192 MB. Small/laptop windows now use ~30–50 MB; high-DPI setups grow automatically. `--cache-mb` overrides the auto sizing; `--render-scale` reduces per-page bytes when memory matters more than maximum sharpness.
 - **LRU is O(1)**: cache touch/evict no longer walks a slice on every Get/Put.
 - **Mipmap reuse during resize**: when the window is mid-drag and the cache doesn't yet have an entry at the new resolution, a larger same-page entry is linearly downsampled by the GPU as a stand-in while the prefetcher catches up at the exact size. No more PDFium hit per Layout tick during a resize.
 - **Direction-aware prefetch**: forward marches now prefetch `[+1, +2, +3, -1]` (mirrored on backward), with the queue depth bumped from 4 to 8. Idle state uses the cheaper `[+1, -1]`.

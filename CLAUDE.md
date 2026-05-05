@@ -39,6 +39,7 @@ Rendering: PDFium compiled to WebAssembly, run inside `wazero` (pure-Go). No nat
 - **PDFium aspect-fits internally.** If you request 800×600 for a portrait page you'll get back e.g. 464×600. Tests assert "non-empty + within requested box," not exact dims.
 - **Flag defaults vs sidecar overrides:** `config.Load` treats `StartPage == 1` as the default and lets the sidecar override; tests must pass `StartPage: 1`, not `0`.
 - **Cache eviction must call `cleanup`** — PDFium-side memory leaks otherwise.
+- **Memory tuning lives in two flags**: `--cache-mb` hard-caps the page cache (skips `autoBudget` in `onLayoutChanged`); `--render-scale F` (0.5..1.0) shrinks `Layout()`'s returned pixel dims so PDFium rasterises smaller bitmaps and the cache holds less. Both are forwarded to the presenter subprocess via spawn args. The cache budget is the only knob we directly own — PDFium's WASM heap and Metal atlas textures grow monotonically.
 
 ## Releases
 

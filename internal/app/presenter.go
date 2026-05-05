@@ -33,6 +33,9 @@ type PresenterGame struct {
 	prefetch *pdf.Prefetcher
 	receiver *ipc.Receiver
 
+	cacheMB     int     // 0 = auto; >0 = hard cap in MB
+	renderScale float64 // 0 = native; 0.5..1.0 fraction of native pixels
+
 	bufW, bufH int
 
 	curImg     *ebiten.Image
@@ -90,8 +93,9 @@ func (c *clockCache) String(now time.Time) string {
 
 // RunPresenter opens the presenter window and blocks until the window closes
 // or the master process disconnects. It is the entry point for the
-// presenter-slave subprocess.
-func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
+// presenter-slave subprocess. cacheMB and renderScale match the master's
+// --cache-mb and --render-scale flags; pass 0 to keep the auto/native default.
+func RunPresenter(socketPath, pdfPath string, monitorIdx, cacheMB int, renderScale float64) error {
 	doc, err := pdf.Open(pdfPath)
 	if err != nil {
 		return err
@@ -100,6 +104,9 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 
 	cache := pdf.NewCache(cacheBudgetInitial)
 	defer cache.Clear()
+	if cacheMB > 0 {
+		cache.Resize(cacheMB << 20)
+	}
 
 	pf := pdf.NewPrefetcher(doc, cache, presenterPrefetchQueue)
 	pf.Start()
@@ -111,10 +118,12 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 	}
 
 	g := &PresenterGame{
-		doc:      doc,
-		cache:    cache,
-		prefetch: pf,
-		receiver: receiver,
+		doc:         doc,
+		cache:       cache,
+		prefetch:    pf,
+		receiver:    receiver,
+		cacheMB:     cacheMB,
+		renderScale: renderScale,
 	}
 
 	ebiten.SetWindowTitle("boozle — Presenter View")
@@ -205,11 +214,17 @@ func (g *PresenterGame) Layout(outsideW, outsideH int) (int, int) {
 	}
 	pxW := int(math.Round(float64(outsideW) * sf))
 	pxH := int(math.Round(float64(outsideH) * sf))
+	if rs := g.renderScale; rs > 0 && rs < 1 {
+		pxW = max(1, int(math.Round(float64(pxW)*rs)))
+		pxH = max(1, int(math.Round(float64(pxH)*rs)))
+	}
 	if pxW != g.bufW || pxH != g.bufH {
 		g.bufW = pxW
 		g.bufH = pxH
 		if g.cache != nil && pxW > 0 && pxH > 0 {
-			g.cache.Resize(autoBudget(pxW, pxH))
+			if g.cacheMB <= 0 {
+				g.cache.Resize(autoBudget(pxW, pxH))
+			}
 			g.cache.PurgeNotMatching(pxW, pxH)
 		}
 	}

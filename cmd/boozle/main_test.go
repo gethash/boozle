@@ -74,7 +74,7 @@ func TestNotesImportHelpIncludesFlags(t *testing.T) {
 }
 
 func TestDefaultVersionIsReleaseVersion(t *testing.T) {
-	if version != "v1.1.1" {
-		t.Fatalf("version = %q, want v1.1.1", version)
+	if version != "v1.2.0" {
+		t.Fatalf("version = %q, want v1.2.0", version)
 	}
 }

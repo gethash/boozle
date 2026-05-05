@@ -43,7 +43,7 @@ The script detects your OS/arch, fetches the right archive, verifies its SHA-256
 Override defaults with env vars:
 
 ```bash
-BOOZLE_VERSION=v1.1.1 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.2.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
@@ -95,6 +95,8 @@ By default boozle opens fullscreen on your primary monitor and waits for you to 
 | `-P, --presenter-monitor <N>` | `-1` | Open presenter view on monitor N. Use a different monitor than `--monitor`, unless also using `--no-fullscreen` for local testing. |
 | `-M, --list-monitors` | | Print the index, name, and DPI scale of every connected display, then exit. |
 | `--no-fullscreen` | `false` | Run windowed (debugging / dev). |
+| `--cache-mb <N>` | `0` | Hard-cap the GPU page cache at N MB. `0` auto-sizes from the active display. |
+| `--render-scale <F>` | `0` | Rasterise pages at fraction `F` of native pixels (`0.5..1.0`). `0` keeps native. Trades a little sharpness for substantially less RAM on big decks / high-DPI displays. |
 | `--config <path>` | _auto_ | Use this TOML sidecar instead of the auto-detected one. |
 | `-h, --help` | | Show help. |
 | `-v, --version` | | Show version. |
@@ -159,6 +161,8 @@ progress   = true
 autoquit   = false
 transition = "fade"
 # presenter_monitor = 1
+# cache_mb     = 64    # hard-cap GPU page cache
+# render_scale = 0.75  # render at 75 % of native pixels
 
 [[page]]
 n    = 3
@@ -201,6 +205,9 @@ boozle deck.pdf --monitor 1 --presenter-monitor 0
 
 # Test presenter mode on one monitor with two windowed views:
 boozle deck.pdf --no-fullscreen --monitor 0 --presenter-monitor 0
+
+# Big deck on a Retina laptop — trade 25 % of pixel area for less memory:
+boozle deck.pdf --render-scale 0.75 --cache-mb 64
 
 # Extract PowerPoint speaker notes once, then present with only PDF + TOML:
 boozle notes import deck.pptx --out deck.boozle.toml

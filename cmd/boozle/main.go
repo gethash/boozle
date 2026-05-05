@@ -88,7 +88,18 @@ Monitor selection:
 
 Speaker notes:
   Use "boozle notes import deck.pptx" to extract PowerPoint speaker notes into
-  a standalone deck.boozle.toml sidecar.`,
+  a standalone deck.boozle.toml sidecar.
+
+Sidecar config:
+  Boozle auto-loads <file>.boozle.toml, or <file>.pdfpc when no Boozle TOML
+  sidecar exists. Use --config <path> to choose one explicitly. CLI flags
+  override sidecar values.
+
+  Supported TOML keys:
+    auto, loop, start, monitor, pages, bg, progress, autoquit, transition,
+    presenter_monitor, cache_mb, render_scale
+
+  Per-page entries use [[page]] with n, auto, and notes fields.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -230,7 +241,16 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
 	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
+	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
+	fmt.Fprintln(w, "      --config <path>     explicit .boozle.toml or .pdfpc sidecar")
+	fmt.Fprintln(w, "      --cache-mb <N>      GPU page cache cap in MB (0 = auto)")
+	fmt.Fprintln(w, "      --render-scale <F>  render at 0.5..1.0 of native pixels")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Sidecars:")
+	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf.")
+	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit,")
+	fmt.Fprintln(w, "  transition, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")

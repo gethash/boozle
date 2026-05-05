@@ -22,6 +22,10 @@ func TestNoArgsPrintsFriendlyHint(t *testing.T) {
 	for _, want := range []string{
 		"boozle: no PDF given.",
 		"-P, --presenter-monitor <N>",
+		"--config <path>",
+		"cache_mb",
+		"render_scale",
+		"slides.boozle.toml",
 		"boozle notes import deck.pptx",
 		"boozle slides.pdf --auto 30s --progress",
 	} {
@@ -45,6 +49,13 @@ func TestHelpIncludesReleaseFeatures(t *testing.T) {
 	for _, want := range []string{
 		"--transition",
 		"--presenter-monitor",
+		"--config",
+		"Sidecar config",
+		"Supported TOML keys",
+		"presenter_monitor",
+		"cache_mb",
+		"render_scale",
+		"[[page]]",
 		"notes",
 		"Speaker notes",
 		"Presenter view",

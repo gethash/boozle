@@ -1,12 +1,16 @@
 package app
 
 import (
+	"image"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/ipc"
+	"github.com/gethash/boozle/internal/pdf"
 	"github.com/gethash/boozle/internal/timer"
 )
 
@@ -246,6 +250,9 @@ func TestOverviewBackgroundRequestsAllSlidesOverTime(t *testing.T) {
 		ov: overview{
 			thumbReq:  make(chan int, overviewThumbQueue),
 			thumbStop: make(chan struct{}),
+			thumbsOn:  true,
+			thumbW:    120,
+			thumbH:    90,
 			requested: make([]bool, total),
 		},
 	}
@@ -271,6 +278,86 @@ func TestOverviewBackgroundRequestsAllSlidesOverTime(t *testing.T) {
 		if !ok {
 			t.Fatalf("slide %d was never requested", i)
 		}
+	}
+}
+
+func TestOverviewHoverIndexMatchesCellScan(t *testing.T) {
+	const total = 500
+	gridX, gridY, cols, _, cellW, cellH, padding := computeOvGrid(total, 1920, 1080)
+	ov := overview{cols: cols, cellW: cellW, cellH: cellH, padding: padding, gridX: gridX, gridY: gridY}
+	ov.buildCells(total)
+
+	for _, idx := range []int{0, 7, 123, 499} {
+		x, y, w, h := ov.cellRect(idx)
+		mx := int(x + w/2)
+		my := int(y + h/2)
+		if got := ov.hoverIndex(mx, my, total); got != idx {
+			t.Fatalf("hoverIndex at cell %d = %d", idx, got)
+		}
+	}
+	if got := ov.hoverIndex(gridX-1, gridY-1, total); got != -1 {
+		t.Fatalf("hoverIndex outside grid = %d, want -1", got)
+	}
+}
+
+func TestOverviewLargeDeckUsesStaticGridAnimation(t *testing.T) {
+	ov := overview{phase: ovEntering}
+	if ov.useStaticGrid(overviewSimpleAnimSlides - 1) {
+		t.Fatal("small entering deck should keep per-tile animation")
+	}
+	if !ov.useStaticGrid(overviewSimpleAnimSlides) {
+		t.Fatal("large entering deck should use static grid animation")
+	}
+	ov.phase = ovActive
+	if !ov.useStaticGrid(12) {
+		t.Fatal("active overview should use the cached static grid")
+	}
+}
+
+func TestPresenterModeOverviewDoesNotStartMasterThumbnails(t *testing.T) {
+	g := &Game{
+		stateCh:  make(chan ipc.PresenterState, 1),
+		pageList: []int{0, 1, 2},
+		listIdx:  1,
+		bufW:     1280,
+		bufH:     720,
+	}
+	g.openOverview()
+	if g.ov.thumbsOn {
+		t.Fatal("master overview thumbnails should be disabled when presenter view owns overview drawing")
+	}
+	if g.ov.thumbReq != nil || g.ov.thumbCh != nil || g.ov.thumbStop != nil {
+		t.Fatal("master overview should not allocate thumbnail worker channels in presenter mode")
+	}
+}
+
+func TestOverviewDiskThumbCacheInvalidatesByPDFAndDimensions(t *testing.T) {
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdfPath, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newOverviewDiskThumbCache(pdfPath)
+	key := pdf.CacheKey{Page: 3, W: 120, H: 90}
+	img := image.NewRGBA(image.Rect(0, 0, key.W, key.H))
+	cache.Save(key, img)
+	if _, ok := cache.Load(key); !ok {
+		t.Fatal("saved thumbnail should load")
+	}
+	if _, ok := cache.Load(pdf.CacheKey{Page: 3, W: 121, H: 90}); ok {
+		t.Fatal("different thumbnail dimensions should miss")
+	}
+
+	if err := os.WriteFile(pdfPath, []byte("two-two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(pdfPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	cache = newOverviewDiskThumbCache(pdfPath)
+	if _, ok := cache.Load(key); ok {
+		t.Fatal("changed PDF size/modtime should invalidate old thumbnail")
 	}
 }
 

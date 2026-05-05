@@ -30,6 +30,9 @@ type Doc struct {
 	docRef   references.FPDF_DOCUMENT
 	pages    int
 	closed   bool
+
+	pageSizes []Page
+	sizeKnown []bool
 }
 
 // Page is the natural size of a PDF page, in PDF points (72 dpi).
@@ -88,10 +91,12 @@ func Open(path string) (*Doc, error) {
 	}
 
 	return &Doc{
-		pool:     pool,
-		instance: instance,
-		docRef:   open.Document,
-		pages:    cnt.PageCount,
+		pool:      pool,
+		instance:  instance,
+		docRef:    open.Document,
+		pages:     cnt.PageCount,
+		pageSizes: make([]Page, cnt.PageCount),
+		sizeKnown: make([]bool, cnt.PageCount),
 	}, nil
 }
 
@@ -105,6 +110,12 @@ func (d *Doc) PageSize(idx int) (Page, error) {
 	if d.closed {
 		return Page{}, errors.New("doc is closed")
 	}
+	if idx < 0 || idx >= d.pages {
+		return Page{}, fmt.Errorf("page %d out of range", idx)
+	}
+	if idx < len(d.sizeKnown) && d.sizeKnown[idx] {
+		return d.pageSizes[idx], nil
+	}
 	resp, err := d.instance.FPDF_GetPageSizeByIndex(&requests.FPDF_GetPageSizeByIndex{
 		Document: d.docRef,
 		Index:    idx,
@@ -112,11 +123,16 @@ func (d *Doc) PageSize(idx int) (Page, error) {
 	if err != nil {
 		return Page{}, fmt.Errorf("page %d size: %w", idx, err)
 	}
-	return Page{
+	page := Page{
 		Index:        idx,
 		WidthPoints:  resp.Width,
 		HeightPoints: resp.Height,
-	}, nil
+	}
+	if idx < len(d.pageSizes) {
+		d.pageSizes[idx] = page
+		d.sizeKnown[idx] = true
+	}
+	return page, nil
 }
 
 // RenderPage rasterizes page idx (0-indexed) at exactly width × height pixels.

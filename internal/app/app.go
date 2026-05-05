@@ -91,6 +91,9 @@ func Run(cfg config.Config) error {
 	pf.Start()
 	defer pf.Stop()
 
+	thumbStore := newOverviewThumbStore(cfg.PDFPath)
+	defer thumbStore.Clear()
+
 	auto := timer.New(cfg.Auto, cfg.PerPage)
 	startIdx := initialIndex(pageList, cfg.StartPage)
 	auto.Reset(pageList[startIdx] + 1)
@@ -101,6 +104,7 @@ func Run(cfg config.Config) error {
 		doc:        doc,
 		cache:      cache,
 		prefetcher: pf,
+		thumbStore: thumbStore,
 		auto:       auto,
 		pageList:   pageList,
 		listIdx:    startIdx,
@@ -231,6 +235,7 @@ type Game struct {
 	doc        *pdf.Doc
 	cache      *pdf.Cache
 	prefetcher *pdf.Prefetcher
+	thumbStore *overviewThumbStore
 	auto       *timer.Auto
 
 	pageList  []int // 0-indexed page numbers, in playback order

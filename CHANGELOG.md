@@ -3,6 +3,19 @@
 All notable changes to boozle are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **Overview thumbnails are cached across sessions and launches**: slide overview now uses a dedicated thumbnail cache with a 128 MB in-process GPU LRU plus a transparent OS-temp PNG cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run should be immediate, and reopening the same unchanged deck can reuse thumbnails from temp without re-rendering them through PDFium.
+- **Overview thumbnail loading is main-thread safe**: background workers now emit CPU RGBA images only; Ebiten GPU uploads happen on the main goroutine before insertion into the thumbnail cache. Audience and presenter overview share this pipeline instead of maintaining duplicate render/upload code.
+- **Large-deck overview drawing does less per frame**: overview precomputes grid cell rectangles, uses O(1) mouse hit testing instead of scanning every slide, caches the static thumbnail grid layer while active, and switches large decks to a simpler grid fade instead of animating every tile independently.
+- **PDF page sizes are cached lazily**: repeated current/next/prefetch layout checks now reuse page dimensions after the first `PageSize` lookup instead of calling PDFium every frame.
+
+### Fixed
+
+- **Presenter overview duplicate work**: in presenter mode, the audience/master process no longer starts a thumbnail loader for overview content it does not draw; the presenter process owns the overview thumbnails it displays.
+
 ## [1.2.0] — 2026-05-05
 
 ### Added

@@ -62,12 +62,24 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "boozle <file.pdf>",
 		Short: "Modern PDF auto-advance presenter",
-		Long: `boozle plays PDF files full-screen with a configurable auto-advance timer.
-A spiritual successor to Impressive, packaged as a single static binary.
+		Long: `Boozle plays PDF decks on an audience display with manual controls,
+auto-advance, presenter view, sidecar configuration, and speaker notes.
+It is a spiritual successor to Impressive packaged as a single binary.
+
+Common examples:
+  boozle slides.pdf --auto 30s --progress
+  boozle slides.pdf --auto 20s --loop --progress
+  boozle slides.pdf --monitor 1 --presenter-monitor 0
+  boozle notes import deck.pptx --out deck.boozle.toml
+
+Audience display:
+  By default Boozle opens the PDF full-screen on monitor 0 and waits for
+  manual navigation. Use --auto to advance on a timer, --loop to restart
+  after the last page, and --autoquit to close after a one-way run.
 
 Keybindings:
-  →  PgDn  Space  Scroll↓   next page
-  ←  PgUp         Scroll↑   previous page
+  Right  PgDn  Space  Scroll down  next page
+  Left   PgUp         Scroll up    previous page
   Backspace                  previous page (or delete a typed digit)
   Home / End                 first / last page
   0-9  then  Enter           jump to page number
@@ -80,17 +92,21 @@ Keybindings:
   q  Esc                     quit
 
 Presenter view (--presenter-monitor):
-  Same navigation keys work when either display has focus. Speaker notes from
-  .boozle.toml or .pdfpc sidecars are shown in the presenter window.
+  Opens a second window for the speaker with current slide, next slide,
+  wall clock, elapsed time, slide counter, auto-advance progress, and notes.
+  The same navigation keys work when either display has focus. Use a monitor
+  different from --monitor, or use --no-fullscreen for one-monitor testing.
 
 Monitor selection:
-  Use --list-monitors (-M) to print connected displays and their indices.
+  Use --list-monitors (-M) to print connected displays and their indices,
+  then pass those indices to --monitor and --presenter-monitor.
 
-Speaker notes:
+PowerPoint speaker-note import:
   Use "boozle notes import deck.pptx" to extract PowerPoint speaker notes into
-  a standalone deck.boozle.toml sidecar.
+  a standalone deck.boozle.toml sidecar. The .pptx is not needed during
+  presentation after the sidecar has been written.
 
-Sidecar config:
+Sidecars:
   Boozle auto-loads <file>.boozle.toml, or <file>.pdfpc when no Boozle TOML
   sidecar exists. Use --config <path> to choose one explicitly. CLI flags
   override sidecar values.
@@ -179,6 +195,11 @@ func newNotesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "notes",
 		Short: "Work with speaker notes sidecars",
+		Long: `Work with speaker notes sidecars.
+
+Boozle shows notes in presenter view from .boozle.toml page entries or from
+.pdfpc sidecars. Use "boozle notes import" to extract PowerPoint speaker notes
+from a .pptx file into a standalone Boozle TOML sidecar.`,
 	}
 	cmd.AddCommand(newNotesImportCmd())
 	return cmd
@@ -193,7 +214,16 @@ func newNotesImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import <file.pptx>",
 		Short: "Extract PowerPoint speaker notes into a Boozle TOML sidecar",
-		Args:  cobra.ExactArgs(1),
+		Long: `Extract PowerPoint speaker notes into a Boozle TOML sidecar.
+
+By default this writes <file>.boozle.toml next to the .pptx. Use --out to pick
+another path. --config is accepted as an alias for --out so the output path
+matches the sidecar terminology used by the presenter command.
+
+The generated sidecar contains normal [[page]] notes entries. Present with the
+PDF plus sidecar later; the .pptx file is not needed at presentation time.
+Use --force to replace an existing sidecar.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outPath != "" && configPath != "" {
 				return fmt.Errorf("use either --out or --config, not both")
@@ -223,7 +253,7 @@ func newNotesImportCmd() *cobra.Command {
 }
 
 // printNoArgsHint shows a friendly summary when boozle is invoked with
-// no PDF — short enough to scan, with concrete examples and a pointer to
+// no PDF - short enough to scan, with concrete examples and a pointer to
 // --help for the full flag reference.
 func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "boozle: no PDF given.")
@@ -231,35 +261,38 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  boozle <file.pdf> [flags]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Common flags:")
+	fmt.Fprintln(w, "Fast starts:")
+	fmt.Fprintln(w, "  boozle slides.pdf --auto 30s --progress")
+	fmt.Fprintln(w, "  boozle slides.pdf --auto 20s --loop --progress")
+	fmt.Fprintln(w, "  boozle slides.pdf --monitor 1 --presenter-monitor 0")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Common playback flags:")
 	fmt.Fprintln(w, "  -a, --auto <duration>   advance every duration (e.g. 30s, 1m30s)")
 	fmt.Fprintln(w, "  -l, --loop              loop back to first page after last")
 	fmt.Fprintln(w, "      --progress          show page-position and countdown bars")
 	fmt.Fprintln(w, "      --autoquit          quit after the last page")
 	fmt.Fprintln(w, "  -s, --start <N>         start at page N (1-indexed)")
+	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
+	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Displays:")
 	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index for slides (0 = primary)")
 	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
 	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
-	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
-	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
+	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Sidecars and notes:")
 	fmt.Fprintln(w, "      --config <path>     explicit .boozle.toml or .pdfpc sidecar")
+	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Performance:")
 	fmt.Fprintln(w, "      --cache-mb <N>      GPU page cache cap in MB (0 = auto)")
 	fmt.Fprintln(w, "      --render-scale <F>  render at 0.5..1.0 of native pixels")
-	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Sidecars:")
 	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf.")
 	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit,")
 	fmt.Fprintln(w, "  transition, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Notes:")
-	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  boozle slides.pdf --auto 30s --progress")
-	fmt.Fprintln(w, "  boozle slides.pdf --auto 1m --loop --progress")
-	fmt.Fprintln(w, "  boozle slides.pdf --auto 20s --autoquit")
-	fmt.Fprintln(w, "  boozle slides.pdf --pages 1-5 --monitor 1")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run 'boozle --help' for keybindings and the full flag reference.")
 }

@@ -21,6 +21,10 @@ func TestNoArgsPrintsFriendlyHint(t *testing.T) {
 	out := stderr.String()
 	for _, want := range []string{
 		"boozle: no PDF given.",
+		"Fast starts:",
+		"Common playback flags:",
+		"Displays:",
+		"Sidecars and notes:",
 		"-P, --presenter-monitor <N>",
 		"--config <path>",
 		"cache_mb",
@@ -47,10 +51,13 @@ func TestHelpIncludesReleaseFeatures(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
+		"Common examples",
+		"Audience display",
 		"--transition",
 		"--presenter-monitor",
 		"--config",
-		"Sidecar config",
+		"PowerPoint speaker-note import",
+		"Sidecars",
 		"Supported TOML keys",
 		"presenter_monitor",
 		"cache_mb",
@@ -66,6 +73,30 @@ func TestHelpIncludesReleaseFeatures(t *testing.T) {
 	}
 }
 
+func TestNotesHelpDescribesSidecars(t *testing.T) {
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"notes", "--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute notes --help: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"speaker notes sidecars",
+		".boozle.toml",
+		".pdfpc",
+		"boozle notes import",
+		"PowerPoint speaker notes",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("notes help missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestNotesImportHelpIncludesFlags(t *testing.T) {
 	cmd := newRootCmd()
 	var out bytes.Buffer
@@ -77,7 +108,15 @@ func TestNotesImportHelpIncludesFlags(t *testing.T) {
 		t.Fatalf("Execute notes import --help: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"--out", "--config", "--force", "file.pptx"} {
+	for _, want := range []string{
+		"--out",
+		"--config",
+		"--force",
+		"file.pptx",
+		"<file>.boozle.toml",
+		"[[page]] notes",
+		"not needed at presentation time",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("notes import help missing %q:\n%s", want, text)
 		}

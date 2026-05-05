@@ -149,6 +149,7 @@ func Run(cfg config.Config) error {
 	}
 
 	ebiten.SetWindowTitle(fmt.Sprintf("boozle — %s", filepath.Base(cfg.PDFPath)))
+	setWindowIcon()
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := display.PickMonitor(cfg.MonitorIdx); err != nil {
 		return err

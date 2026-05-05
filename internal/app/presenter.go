@@ -118,6 +118,7 @@ func RunPresenter(socketPath, pdfPath string, monitorIdx int) error {
 	}
 
 	ebiten.SetWindowTitle("boozle — Presenter View")
+	setWindowIcon()
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := display.PickMonitor(monitorIdx); err != nil {
 		return err

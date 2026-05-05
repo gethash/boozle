@@ -101,6 +101,10 @@ Monitor selection:
   Use --list-monitors (-M) to print connected displays and their indices,
   then pass those indices to --monitor and --presenter-monitor.
 
+Speaker notes:
+  Presenter view shows notes from Boozle TOML sidecars, .pdfpc sidecars,
+  or imported PowerPoint notes.
+
 PowerPoint speaker-note import:
   Use "boozle notes import deck.pptx" to extract PowerPoint speaker notes into
   a standalone deck.boozle.toml sidecar. The .pptx is not needed during

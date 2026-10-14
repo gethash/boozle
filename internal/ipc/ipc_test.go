@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -76,8 +77,12 @@ func TestHelloStateAndCommandRoundTrip(t *testing.T) {
 	}
 
 	dir := filepath.Dir(srv.Path())
-	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
-		t.Fatalf("socket dir perms = %v (%v), want 0700", st.Mode().Perm(), err)
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
+		t.Fatalf("socket dir perms = %v, want 0700", st.Mode().Perm())
 	}
 
 	_ = srv.Close()

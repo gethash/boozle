@@ -257,13 +257,18 @@ func loadSidecar(pdfPath, override string) (*sidecar, string, error) {
 	return s, path, nil
 }
 
+// SidecarPath returns the conventional Boozle sidecar path for a file:
+// deck.pdf (or deck.pptx) → deck.boozle.toml.
+func SidecarPath(file string) string {
+	return strings.TrimSuffix(file, filepath.Ext(file)) + ".boozle.toml"
+}
+
 func resolveSidecarPath(pdfPath, override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	ext := filepath.Ext(pdfPath)
-	base := strings.TrimSuffix(pdfPath, ext)
-	for _, path := range []string{base + ".boozle.toml", base + ".pdfpc"} {
+	pdfpc := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + ".pdfpc"
+	for _, path := range []string{SidecarPath(pdfPath), pdfpc} {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		} else if !os.IsNotExist(err) {

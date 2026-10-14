@@ -17,7 +17,9 @@ import (
 	"github.com/gethash/boozle/internal/pptxnotes"
 )
 
-// Set by goreleaser via -ldflags.
+// Set by the release workflow via -ldflags. The default tracks the latest
+// release because Homebrew builds from the source tarball without ldflags
+// (TestDefaultVersionMatchesChangelog keeps it in sync).
 var (
 	version = "v1.2.0"
 	commit  = "none"
@@ -77,31 +79,35 @@ Common examples:
 Audience display:
   By default Boozle opens the PDF full-screen on monitor 0 and waits for
   manual navigation. Use --auto to advance on a timer, --loop to restart
-  after the last page, and --autoquit to close after a one-way run.
+  after the last page, and --autoquit to close when advancing past the
+  last page.
 
 Keybindings:
   Right  PgDn  Space  Scroll down  next page
   Left   PgUp         Scroll up    previous page
   Backspace                  previous page (or delete a typed digit)
   Home / End                 first / last page
-  0-9  then  Enter           jump to page number
+  0-9  then  Enter           jump to page number (top row or numpad)
   l                          return to previously viewed page
   p                          pause / resume auto-advance
   b                          black-out screen (toggle)
   w                          white-out screen (toggle)
-  f                          toggle fullscreen
-  Tab                        slide overview (navigate thumbnails, Enter or click to jump)
+  f                          toggle fullscreen (audience window)
+  Tab                        slide overview (arrows select, Enter or click
+                             jumps, Tab or Esc closes)
   q  Esc                     quit
 
 Presenter view (--presenter-monitor):
   Opens a second window for the speaker with current slide, next slide,
   wall clock, elapsed time, slide counter, auto-advance progress, and notes.
-  The same navigation keys work when either display has focus. Use a monitor
-  different from --monitor, or use --no-fullscreen for one-monitor testing.
+  The same navigation keys work when either display has focus, and the Tab
+  overview opens on the presenter screen. Use a monitor different from
+  --monitor, or use --no-fullscreen for one-monitor testing.
 
 Monitor selection:
-  Use --list-monitors (-M) to print connected displays and their indices,
-  then pass those indices to --monitor and --presenter-monitor.
+  Use --list-monitors (-M) to print connected displays, then pass an index
+  or a name (or a unique part of one, e.g. "hdmi") to --monitor and
+  --presenter-monitor. On Linux, --debug-stats logs fullscreen placement.
 
 Speaker notes:
   Presenter view shows notes from Boozle TOML sidecars, .pdfpc sidecars,
@@ -114,8 +120,8 @@ PowerPoint speaker-note import:
 
 Sidecars:
   Boozle auto-loads <file>.boozle.toml, or <file>.pdfpc when no Boozle TOML
-  sidecar exists. Use --config <path> to choose one explicitly. CLI flags
-  override sidecar values.
+  sidecar exists. Use --config <path> to choose one explicitly. Flags given
+  on the command line always override sidecar values.
 
   Supported TOML keys:
     auto, loop, start, monitor, pages, bg, progress, autoquit, transition,
@@ -259,7 +265,7 @@ Use --force to replace an existing sidecar.`,
 				target = configPath
 			}
 			if target == "" {
-				target = pptxnotes.DefaultSidecarPath(args[0])
+				target = config.SidecarPath(args[0])
 			}
 			notes, err := pptxnotes.Extract(args[0])
 			if err != nil {
@@ -301,24 +307,25 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "      --bg <#hex>         background color around the slide")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Displays:")
-	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index for slides (0 = primary)")
-	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
+	fmt.Fprintln(w, "  -m, --monitor <N|name>  monitor for slides (0 = primary)")
+	fmt.Fprintln(w, "  -P, --presenter-monitor <N|name>  monitor for presenter view")
 	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Sidecars and notes:")
+	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf;")
+	fmt.Fprintln(w, "  flags given on the command line win over sidecar values.")
+	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit, transition,")
+	fmt.Fprintln(w, "  monitor, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
 	fmt.Fprintln(w, "      --config <path>     explicit .boozle.toml or .pdfpc sidecar")
 	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Performance:")
 	fmt.Fprintln(w, "      --cache-mb <N>      GPU page cache cap in MB (0 = auto)")
 	fmt.Fprintln(w, "      --render-scale <F>  render at 0.5..1.0 of native pixels")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Sidecars:")
-	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf.")
-	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit,")
-	fmt.Fprintln(w, "  transition, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run 'boozle --help' for keybindings and the full flag reference.")
 }

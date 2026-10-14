@@ -572,9 +572,12 @@ func (g *Game) updateOverview(presenterCmds []ipc.PresenterCommand) error {
 		if ov.step() {
 			exitTo, from := ov.exitToIdx, ov.fromIdx
 			ov.release(g.pipe)
-			g.listIdx = exitTo
-			g.prevListIdx = from
-			g.auto.Reset(g.currentPage() + 1)
+			// The zoom-out was the transition; just record the jump.
+			if exitTo != from {
+				g.prevListIdx = from
+				g.listIdx = exitTo
+				g.auto.Reset(g.currentPage() + 1)
+			}
 		}
 	}
 

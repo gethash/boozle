@@ -735,10 +735,15 @@ func (g *Game) autoProgressFraction() float64 {
 // handleNavigation reads local and presenter-window input and updates
 // listIdx / digitBuf.
 func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) error {
-	// Digits accumulate into the jump buffer.
+	// Digits (top row or numpad) accumulate into the jump buffer.
 	for k := ebiten.KeyDigit0; k <= ebiten.KeyDigit9; k++ {
 		if inpututil.IsKeyJustPressed(k) {
 			g.appendDigit(int(k - ebiten.KeyDigit0))
+		}
+	}
+	for k := ebiten.KeyNumpad0; k <= ebiten.KeyNumpad9; k++ {
+		if inpututil.IsKeyJustPressed(k) {
+			g.appendDigit(int(k - ebiten.KeyNumpad0))
 		}
 	}
 	for _, cmd := range presenterCmds {
@@ -786,19 +791,16 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) error {
 		g.advance(-1)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyHome) || presenterCmdPressed(presenterCmds, presenterCmdHome) {
-		g.beginTransition(0)
-		g.listIdx = 0
+		g.goTo(0, 0)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) || presenterCmdPressed(presenterCmds, presenterCmdEnd) {
-		g.beginTransition(0)
-		g.listIdx = len(g.pageList) - 1
+		g.goTo(len(g.pageList)-1, 0)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF) || presenterCmdPressed(presenterCmds, presenterCmdFullscreen) {
 		g.place = toggleFullscreen(g.place, g.monitor)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyL) || presenterCmdPressed(presenterCmds, presenterCmdReturnLast) {
-		g.beginTransition(0)
-		g.listIdx, g.prevListIdx = g.prevListIdx, g.listIdx
+		g.goTo(g.prevListIdx, 0)
 	}
 
 	// Mouse wheel: scroll down = next page, up = previous.
@@ -849,27 +851,39 @@ func (g *Game) advance(delta int) {
 		return
 	}
 	g.lastNavDir = sign(delta)
-	g.beginTransition(g.lastNavDir)
+	g.goTo(next, g.lastNavDir)
+}
+
+// goTo moves to list index idx, animating in direction dir (0 = jump,
+// which fades), and remembers the previous position for "l". It does
+// nothing when idx is already current.
+func (g *Game) goTo(idx, dir int) {
+	if idx < 0 || idx >= len(g.pageList) || idx == g.listIdx {
+		return
+	}
+	g.beginTransition(dir)
 	g.prevListIdx = g.listIdx
-	g.listIdx = next
+	g.listIdx = idx
 }
 
 // jumpTo1Indexed seeks to a doc page (1-indexed). If it's been filtered out by
 // --pages, the nearest later page is selected.
 func (g *Game) jumpTo1Indexed(n int) {
-	g.beginTransition(0)
-	target := n - 1
-	for i, p := range g.pageList {
-		if p == target {
-			g.listIdx = i
-			return
+	g.goTo(listIndexForPage(g.pageList, n-1), 0)
+}
+
+// listIndexForPage returns the play-list position showing page (0-indexed),
+// or the next later page if it was filtered out, or the last position.
+func listIndexForPage(pageList []int, page int) int {
+	for i, p := range pageList {
+		if p == page {
+			return i
 		}
 	}
-	for i, p := range g.pageList {
-		if p > target {
-			g.listIdx = i
-			return
+	for i, p := range pageList {
+		if p > page {
+			return i
 		}
 	}
-	g.listIdx = len(g.pageList) - 1
+	return len(pageList) - 1
 }

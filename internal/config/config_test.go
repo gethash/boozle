@@ -481,3 +481,14 @@ func TestParseColor(t *testing.T) {
 		})
 	}
 }
+
+// TestExampleSidecarLoads keeps examples/sample.boozle.toml valid.
+func TestExampleSidecarLoads(t *testing.T) {
+	c, err := Load(Flags{PDFPath: filepath.Join("..", "..", "examples", "sample.pdf"), StartPage: 1})
+	if err != nil {
+		t.Fatalf("Load(examples/sample.pdf): %v", err)
+	}
+	if c.Auto != 30*time.Second || !c.Loop || c.PerPage[3] != time.Minute || c.Notes[3] == "" {
+		t.Fatalf("example sidecar not applied: %+v", c)
+	}
+}

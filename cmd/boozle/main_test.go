@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -25,7 +28,8 @@ func TestNoArgsPrintsFriendlyHint(t *testing.T) {
 		"Common playback flags:",
 		"Displays:",
 		"Sidecars and notes:",
-		"-P, --presenter-monitor <N>",
+		"-P, --presenter-monitor <N|name>",
+		"--bg <#hex>",
 		"--config <path>",
 		"cache_mb",
 		"render_scale",
@@ -123,8 +127,19 @@ func TestNotesImportHelpIncludesFlags(t *testing.T) {
 	}
 }
 
-func TestDefaultVersionIsReleaseVersion(t *testing.T) {
-	if version != "v1.2.0" {
-		t.Fatalf("version = %q, want v1.2.0", version)
+// TestDefaultVersionMatchesChangelog keeps the built-in version (used by
+// source builds such as Homebrew's) in step with the newest release in
+// CHANGELOG.md.
+func TestDefaultVersionMatchesChangelog(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CHANGELOG.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^## \[(\d+\.\d+\.\d+)\]`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("no released version heading in CHANGELOG.md")
+	}
+	if want := "v" + string(m[1]); version != want {
+		t.Fatalf("version = %q, but the newest CHANGELOG release is %s", version, want)
 	}
 }

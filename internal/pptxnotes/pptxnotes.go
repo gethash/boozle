@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -107,12 +106,6 @@ func WriteSidecar(outPath string, notes []SlideNote, force bool) error {
 		return err
 	}
 	return os.WriteFile(outPath, buf.Bytes(), 0o644)
-}
-
-// DefaultSidecarPath returns the conventional sidecar path for a source file.
-func DefaultSidecarPath(src string) string {
-	ext := filepath.Ext(src)
-	return strings.TrimSuffix(src, ext) + ".boozle.toml"
 }
 
 func readSlideRelIDs(files map[string]*zip.File, name string) ([]string, error) {

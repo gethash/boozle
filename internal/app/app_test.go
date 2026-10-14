@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hajimehoshi/ebiten/v2"
+
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/ipc"
 	"github.com/gethash/boozle/internal/pdf"
@@ -668,5 +670,51 @@ func TestPresenterBudgetCoversPanes(t *testing.T) {
 	next := pdf.TextureBytes(lo.nextContent.w, lo.nextContent.h)
 	if got := presenterBudget(lo); got < 2*cur+2*next {
 		t.Fatalf("presenterBudget = %d MB, want room for current+next panes and their prefetch (%d MB)", got>>20, (2*cur+2*next)>>20)
+	}
+}
+
+func TestGoToRecordsPreviousPositionForEveryJump(t *testing.T) {
+	g := &Game{pageList: []int{0, 1, 2, 3, 4, 5}, listIdx: 1, prevListIdx: 0}
+
+	g.goTo(5, 0) // End
+	if g.listIdx != 5 || g.prevListIdx != 1 {
+		t.Fatalf("End: listIdx=%d prev=%d, want 5/1", g.listIdx, g.prevListIdx)
+	}
+	g.jumpTo1Indexed(3)
+	if g.listIdx != 2 || g.prevListIdx != 5 {
+		t.Fatalf("jump to page 3: listIdx=%d prev=%d, want 2/5", g.listIdx, g.prevListIdx)
+	}
+	g.goTo(g.prevListIdx, 0) // l
+	if g.listIdx != 5 || g.prevListIdx != 2 {
+		t.Fatalf("l: listIdx=%d prev=%d, want 5/2", g.listIdx, g.prevListIdx)
+	}
+	g.goTo(5, 0) // already there: no-op, prev untouched
+	if g.listIdx != 5 || g.prevListIdx != 2 {
+		t.Fatalf("goTo(current): listIdx=%d prev=%d, want unchanged 5/2", g.listIdx, g.prevListIdx)
+	}
+}
+
+func TestGoToCurrentStartsNoTransition(t *testing.T) {
+	g := &Game{pageList: []int{0, 1}, listIdx: 0}
+	g.trans.style = transFade
+	g.disp.img = ebiten.NewImage(4, 4)
+	defer g.disp.img.Deallocate()
+
+	g.goTo(0, 0) // Home on the first slide
+	if g.trans.active {
+		t.Fatal("jumping to the current slide must not start a transition")
+	}
+	g.goTo(1, 0)
+	if !g.trans.active {
+		t.Fatal("a real jump should start the fade")
+	}
+}
+
+func TestListIndexForPage(t *testing.T) {
+	pl := []int{1, 3, 5}
+	for _, tt := range []struct{ page, want int }{{1, 0}, {3, 1}, {2, 1}, {0, 0}, {9, 2}} {
+		if got := listIndexForPage(pl, tt.page); got != tt.want {
+			t.Errorf("listIndexForPage(%d) = %d, want %d", tt.page, got, tt.want)
+		}
 	}
 }

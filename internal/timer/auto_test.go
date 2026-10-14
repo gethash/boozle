@@ -8,7 +8,7 @@ import (
 // fakeClock makes Auto deterministic in tests.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time         { return c.t }
+func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newWithClock(def time.Duration, perPage map[int]time.Duration, c *fakeClock) *Auto {

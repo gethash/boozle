@@ -8,7 +8,7 @@ import (
 // fakeClock makes Auto deterministic in tests.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time         { return c.t }
+func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func newWithClock(def time.Duration, perPage map[int]time.Duration, c *fakeClock) *Auto {
@@ -146,5 +146,27 @@ func TestAutoPerPageOverride(t *testing.T) {
 	c.advance(2 * time.Second)
 	if !a.ShouldAdvance() {
 		t.Error("page 3's 1s override should have fired by t=2s")
+	}
+}
+
+func TestRate(t *testing.T) {
+	a := New(4*time.Second, map[int]time.Duration{2: 10 * time.Second})
+	if got := a.Rate(); got != 0 {
+		t.Fatalf("Rate before Reset = %v, want 0", got)
+	}
+	a.Reset(1)
+	if got := a.Rate(); got != 0.25 {
+		t.Fatalf("Rate = %v, want 0.25", got)
+	}
+	a.Reset(2)
+	if got := a.Rate(); got != 0.1 {
+		t.Fatalf("Rate for per-page override = %v, want 0.1", got)
+	}
+	a.TogglePause(2)
+	if got := a.Rate(); got != 0 {
+		t.Fatalf("Rate while paused = %v, want 0", got)
+	}
+	if got := New(0, nil).Rate(); got != 0 {
+		t.Fatalf("Rate inactive = %v, want 0", got)
 	}
 }

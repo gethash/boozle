@@ -1,0 +1,95 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R 11 0 R 13 0 R ] /Count 6 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+4 0 obj
+<< /Length 175 >>
+stream
+0.11 0.13 0.2 rg 0 0 960 540 re f
+BT 1 1 1 rg /F1 45 Tf 76.8 324 Td (boozle sample deck) Tj ET
+BT 1 1 1 rg /F1 45 Tf 76.8 256.5 Td (Right / Space: next   Left: previous) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 6 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+6 0 obj
+<< /Length 169 >>
+stream
+0.1 0.35 0.55 rg 0 0 960 540 re f
+BT 1 1 1 rg /F1 45 Tf 76.8 324 Td (Tab: slide overview) Tj ET
+BT 1 1 1 rg /F1 45 Tf 76.8 256.5 Td (Digits + Enter: jump to slide) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 8 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+8 0 obj
+<< /Length 169 >>
+stream
+0.15 0.45 0.3 rg 0 0 960 540 re f
+BT 1 1 1 rg /F1 45 Tf 76.8 324 Td (b / w: black / white screen) Tj ET
+BT 1 1 1 rg /F1 45 Tf 76.8 256.5 Td (p: pause auto-advance) Tj ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 10 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+10 0 obj
+<< /Length 153 >>
+stream
+0.55 0.3 0.1 rg 0 0 960 540 re f
+BT 1 1 1 rg /F1 45 Tf 76.8 324 Td (f: toggle fullscreen) Tj ET
+BT 1 1 1 rg /F1 45 Tf 76.8 256.5 Td (q / Esc: quit) Tj ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 540 960] /Contents 12 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+12 0 obj
+<< /Length 146 >>
+stream
+0.45 0.15 0.4 rg 0 0 540 960 re f
+BT 1 1 1 rg /F1 80 Tf 43.2 576 Td (Portrait page) Tj ET
+BT 1 1 1 rg /F1 80 Tf 43.2 456 Td (\(aspect-fit\)) Tj ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 14 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>
+endobj
+14 0 obj
+<< /Length 81 >>
+stream
+0.2 0.2 0.2 rg 0 0 960 540 re f
+BT 1 1 1 rg /F1 45 Tf 76.8 324 Td (The end) Tj ET
+endstream
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000154 00000 n 
+0000000329 00000 n 
+0000000555 00000 n 
+0000000730 00000 n 
+0000000950 00000 n 
+0000001125 00000 n 
+0000001345 00000 n 
+0000001521 00000 n 
+0000001726 00000 n 
+0000001903 00000 n 
+0000002101 00000 n 
+0000002278 00000 n 
+trailer
+<< /Size 15 /Root 1 0 R >>
+startxref
+2410
+%%EOF

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/gethash/boozle/internal/app"
 	"github.com/gethash/boozle/internal/config"
@@ -16,9 +17,11 @@ import (
 	"github.com/gethash/boozle/internal/pptxnotes"
 )
 
-// Set by goreleaser via -ldflags.
+// Set by the release workflow via -ldflags. The default tracks the latest
+// release because Homebrew builds from the source tarball without ldflags
+// (TestDefaultVersionMatchesChangelog keeps it in sync).
 var (
-	version = "v1.2.0"
+	version = "v1.3.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -44,7 +47,7 @@ func newRootCmd() *cobra.Command {
 		auto             time.Duration
 		loop             bool
 		startPage        int
-		monitorIdx       int
+		monitor          string
 		pages            string
 		bg               string
 		noFullscreen     bool
@@ -52,8 +55,9 @@ func newRootCmd() *cobra.Command {
 		progress         bool
 		autoQuit         bool
 		transition       string
-		presenterMonitor int
+		presenterMonitor string
 		presenterSocket  string // hidden internal flag for the slave subprocess
+		debugStats       bool   // hidden: periodic memory/render diagnostics
 		listMonitors     bool
 		cacheMB          int
 		renderScale      float64
@@ -75,31 +79,35 @@ Common examples:
 Audience display:
   By default Boozle opens the PDF full-screen on monitor 0 and waits for
   manual navigation. Use --auto to advance on a timer, --loop to restart
-  after the last page, and --autoquit to close after a one-way run.
+  after the last page, and --autoquit to close when advancing past the
+  last page.
 
 Keybindings:
   Right  PgDn  Space  Scroll down  next page
   Left   PgUp         Scroll up    previous page
   Backspace                  previous page (or delete a typed digit)
   Home / End                 first / last page
-  0-9  then  Enter           jump to page number
+  0-9  then  Enter           jump to page number (top row or numpad)
   l                          return to previously viewed page
   p                          pause / resume auto-advance
   b                          black-out screen (toggle)
   w                          white-out screen (toggle)
-  f                          toggle fullscreen
-  Tab                        slide overview (navigate thumbnails, Enter or click to jump)
+  f                          toggle fullscreen (audience window)
+  Tab                        slide overview (arrows select, Enter or click
+                             jumps, Tab or Esc closes)
   q  Esc                     quit
 
 Presenter view (--presenter-monitor):
   Opens a second window for the speaker with current slide, next slide,
   wall clock, elapsed time, slide counter, auto-advance progress, and notes.
-  The same navigation keys work when either display has focus. Use a monitor
-  different from --monitor, or use --no-fullscreen for one-monitor testing.
+  The same navigation keys work when either display has focus, and the Tab
+  overview opens on the presenter screen. Use a monitor different from
+  --monitor, or use --no-fullscreen for one-monitor testing.
 
 Monitor selection:
-  Use --list-monitors (-M) to print connected displays and their indices,
-  then pass those indices to --monitor and --presenter-monitor.
+  Use --list-monitors (-M) to print connected displays, then pass an index
+  or a name (or a unique part of one, e.g. "hdmi") to --monitor and
+  --presenter-monitor. On Linux, --debug-stats logs fullscreen placement.
 
 Speaker notes:
   Presenter view shows notes from Boozle TOML sidecars, .pdfpc sidecars,
@@ -112,8 +120,8 @@ PowerPoint speaker-note import:
 
 Sidecars:
   Boozle auto-loads <file>.boozle.toml, or <file>.pdfpc when no Boozle TOML
-  sidecar exists. Use --config <path> to choose one explicitly. CLI flags
-  override sidecar values.
+  sidecar exists. Use --config <path> to choose one explicitly. Flags given
+  on the command line always override sidecar values.
 
   Supported TOML keys:
     auto, loop, start, monitor, pages, bg, progress, autoquit, transition,
@@ -127,7 +135,7 @@ Sidecars:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listMonitors {
 				fmt.Fprintln(cmd.OutOrStdout(), "Available monitors:")
-				return display.PrintMonitors()
+				return display.PrintMonitors(cmd.OutOrStdout())
 			}
 
 			if len(args) == 0 {
@@ -144,7 +152,15 @@ Sidecars:
 
 			// Presenter slave mode: spawned by the master with a hidden flag.
 			if presenterSocket != "" {
-				return app.RunPresenter(presenterSocket, pdfPath, monitorIdx, cacheMB, renderScale)
+				return app.RunPresenter(app.PresenterOptions{
+					SocketPath:  presenterSocket,
+					PDFPath:     pdfPath,
+					Monitor:     monitor,
+					Windowed:    noFullscreen,
+					CacheMB:     cacheMB,
+					RenderScale: renderScale,
+					DebugStats:  debugStats,
+				})
 			}
 
 			cfg, err := config.Load(config.Flags{
@@ -152,7 +168,8 @@ Sidecars:
 				Auto:             auto,
 				Loop:             loop,
 				StartPage:        startPage,
-				MonitorIdx:       monitorIdx,
+				Changed:          changedFlags(cmd),
+				Monitor:          monitor,
 				Pages:            pages,
 				Background:       bg,
 				NoFullscreen:     noFullscreen,
@@ -163,6 +180,7 @@ Sidecars:
 				PresenterMonitor: presenterMonitor,
 				CacheMB:          cacheMB,
 				RenderScale:      renderScale,
+				DebugStats:       debugStats,
 			})
 			if err != nil {
 				return err
@@ -177,7 +195,7 @@ Sidecars:
 	cmd.Flags().DurationVarP(&auto, "auto", "a", 0, "advance every duration (e.g. 30s, 1m30s); 0 disables")
 	cmd.Flags().BoolVarP(&loop, "loop", "l", false, "loop back to first page after last")
 	cmd.Flags().IntVarP(&startPage, "start", "s", 1, "start at page N (1-indexed)")
-	cmd.Flags().IntVarP(&monitorIdx, "monitor", "m", 0, "monitor index (0 = primary)")
+	cmd.Flags().StringVarP(&monitor, "monitor", "m", "0", "monitor index or name (0 = primary; see --list-monitors)")
 	cmd.Flags().StringVar(&pages, "pages", "", `restrict to a page range, e.g. "3-7,10"`)
 	cmd.Flags().StringVar(&bg, "bg", "#000000", "background color hex")
 	cmd.Flags().BoolVar(&noFullscreen, "no-fullscreen", false, "windowed mode (debugging)")
@@ -185,14 +203,24 @@ Sidecars:
 	cmd.Flags().BoolVar(&progress, "progress", false, "show page-position and auto-advance progress overlay")
 	cmd.Flags().BoolVar(&autoQuit, "autoquit", false, "quit after the last page instead of stopping")
 	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")
-	cmd.Flags().IntVarP(&presenterMonitor, "presenter-monitor", "P", -1, "monitor index for presenter view (-1 = disabled)")
+	cmd.Flags().StringVarP(&presenterMonitor, "presenter-monitor", "P", "", "monitor index or name for the presenter view (empty or -1 = disabled)")
 	cmd.Flags().BoolVarP(&listMonitors, "list-monitors", "M", false, "list available monitors and exit")
 	cmd.Flags().IntVar(&cacheMB, "cache-mb", 0, "GPU page cache cap in MB (0 = auto-size to display)")
 	cmd.Flags().Float64Var(&renderScale, "render-scale", 0, "render at fraction of native pixels (0.5..1.0; 0 = native)")
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
+	cmd.Flags().BoolVar(&debugStats, "debug-stats", false, "print memory and render diagnostics to stderr every 2s")
+	_ = cmd.Flags().MarkHidden("debug-stats")
 
 	return cmd
+}
+
+// changedFlags returns the long names of flags set explicitly on the
+// command line; only those override sidecar values.
+func changedFlags(cmd *cobra.Command) map[string]bool {
+	changed := map[string]bool{}
+	cmd.Flags().Visit(func(f *pflag.Flag) { changed[f.Name] = true })
+	return changed
 }
 
 func newNotesCmd() *cobra.Command {
@@ -237,7 +265,7 @@ Use --force to replace an existing sidecar.`,
 				target = configPath
 			}
 			if target == "" {
-				target = pptxnotes.DefaultSidecarPath(args[0])
+				target = config.SidecarPath(args[0])
 			}
 			notes, err := pptxnotes.Extract(args[0])
 			if err != nil {
@@ -279,24 +307,25 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "      --bg <#hex>         background color around the slide")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Displays:")
-	fmt.Fprintln(w, "  -m, --monitor <N>       monitor index for slides (0 = primary)")
-	fmt.Fprintln(w, "  -P, --presenter-monitor <N>  monitor index for presenter view")
+	fmt.Fprintln(w, "  -m, --monitor <N|name>  monitor for slides (0 = primary)")
+	fmt.Fprintln(w, "  -P, --presenter-monitor <N|name>  monitor for presenter view")
 	fmt.Fprintln(w, "  -M, --list-monitors     list connected displays and exit")
 	fmt.Fprintln(w, "      --no-fullscreen     run windowed (debugging)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Sidecars and notes:")
+	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf;")
+	fmt.Fprintln(w, "  flags given on the command line win over sidecar values.")
+	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit, transition,")
+	fmt.Fprintln(w, "  monitor, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
 	fmt.Fprintln(w, "      --config <path>     explicit .boozle.toml or .pdfpc sidecar")
 	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Performance:")
 	fmt.Fprintln(w, "      --cache-mb <N>      GPU page cache cap in MB (0 = auto)")
 	fmt.Fprintln(w, "      --render-scale <F>  render at 0.5..1.0 of native pixels")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Sidecars:")
-	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf.")
-	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit,")
-	fmt.Fprintln(w, "  transition, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run 'boozle --help' for keybindings and the full flag reference.")
 }

@@ -34,8 +34,24 @@ jobs:
             libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev \
             libxkbcommon-dev
 
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go mod tidy
+        if: runner.os == 'Linux'
+        run: go mod tidy -diff
+
       - name: go vet
         run: go vet ./...
+
+      - name: staticcheck
+        if: runner.os == 'Linux'
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
 
       - name: go build
         run: go build ./...

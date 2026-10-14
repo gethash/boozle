@@ -5,15 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-14
+
+### Added
+
+- **Release binaries for macOS Intel and Linux ARM64** (`darwin-amd64`, `linux-arm64`), which the installer already expected; every release build is smoke-tested with `--version`.
+- **Monitors by name**: `--monitor` and `--presenter-monitor` (and `monitor` / `presenter_monitor` in sidecars) accept a name or a unique part of one — e.g. `--monitor HDMI-1` — besides an index. `--list-monitors` now prints each monitor's name, size and scale and marks the primary.
+- **Window-manager rules on Linux**: windows carry `WM_CLASS` `boozle` with instance `audience` or `presenter`.
+- **`--debug-stats`** (hidden): prints GPU/heap usage, cache occupancy, render queue lengths and render timings to stderr every two seconds, for both windows.
+- **`examples/sample.pdf`**: a small generated deck for local dev runs; `examples/sample.boozle.toml` now matches it and documents name-based monitors and memory settings. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
+
 ### Changed
 
-- **Overview thumbnails are cached across sessions and launches**: slide overview now uses a dedicated thumbnail cache with a 128 MB in-process GPU LRU plus a transparent OS-temp PNG cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run should be immediate, and reopening the same unchanged deck can reuse thumbnails from temp without re-rendering them through PDFium.
-- **Overview thumbnail loading is main-thread safe**: background workers now emit CPU RGBA images only; Ebiten GPU uploads happen on the main goroutine before insertion into the thumbnail cache. Audience and presenter overview share this pipeline instead of maintaining duplicate render/upload code.
+- **Overview opens in presenter view**: with presenter view on, `Tab` (from either window) opens the slide grid in the presenter window only; the audience keeps seeing the current slide until you pick one with Enter or a click.
+- **Overview thumbnails are cached across sessions and launches**: an in-process GPU cache plus a PNG disk cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run is immediate, and reopening the same unchanged deck reuses thumbnails without re-rendering them through PDFium.
 - **Large-deck overview drawing does less per frame**: overview precomputes grid cell rectangles, uses O(1) mouse hit testing instead of scanning every slide, caches the static thumbnail grid layer while active, and switches large decks to a simpler grid fade instead of animating every tile independently.
-- **PDF page sizes are cached lazily**: repeated current/next/prefetch layout checks now reuse page dimensions after the first `PageSize` lookup instead of calling PDFium every frame.
+- **PDF page sizes are read once at open**: `PageSize` no longer touches PDFium (or waits behind a render) after the document is opened.
+- **Near-instant startup**: the compiled PDFium WebAssembly module is cached in the user cache directory (`<user cache>/boozle/wazero`, override with `BOOZLE_CACHE_DIR`). Opening a PDF drops from about a second to a few tens of milliseconds after the first run — for both the audience and the presenter process.
+- **One render scheduler per window**: all PDFium work runs on a single prioritised worker — the visible slide first, then the presenter's next pane and overview preview, then prefetch, then background thumbnails. A newer "current slide" request replaces an older one, so holding an arrow key coalesces into one render, and stale prefetch work is cancelled instead of rendered.
+- **Navigation never renders on the UI thread**: on a cache miss the previous slide (or a scaled render of the new one) stays up until the exact render lands, and the transition starts only once the new slide is on screen.
+- **Presenter view prefetches for real**: it now renders the next slide at current-pane size and the slide after next at next-pane size ahead of time; on advance the old next-pane image stands in, so advancing no longer costs two synchronous renders in the presenter.
+- **Leaner presenter IPC**: the play list, notes and start time are sent once on connect; afterwards only changed state is sent (the presenter extrapolates the clock and auto-advance progress locally), instead of a full JSON snapshot every frame. The socket now lives in a private `0700` temp directory and accepts exactly one connection.
+- **Idle frames are skipped**: both windows keep the last frame when nothing changed, so a static slide costs next to no GPU time.
+- **Slides get dedicated GPU textures, and the cache counts what they really cost**: Ebitengine rounds textures to powers of two (a 1280×720 slide occupies 2048×1024), which the cache used to ignore, and full-screen slides shared atlases that were only freed when completely empty. Slides are now unmanaged images that are freed on eviction, and the budget — automatic or `--cache-mb` — is charged at real texture size, so it now caps actual GPU memory. The automatic budget never drops below three slides (current, next, previous), and the prefetch depth adapts so prefetched slides are not evicted before they are shown.
+- **Lower memory overall**: on a 300-page deck the audience process now settles around 155 MB RSS instead of ~355 MB in a 1280×720 window, and around 340 MB instead of ~850 MB (peak 369 MB instead of 1.1 GB) full-screen on a Retina display (macOS). This comes from holding at most one bitmap in PDFium's WebAssembly heap, honest GPU budgeting, bounding finished-but-not-yet-uploaded renders to ~32 MB, and returning Ebitengine's upload staging buffers for reuse promptly.
+- **Overview thumbnails are sized to the grid**: the thumbnail GPU cache is budgeted at twice what the current grid needs instead of a fixed 128 MB, thumbnails of other window sizes are dropped, and memory is returned to the OS when the overview closes.
+- **Thumbnail disk cache moved and pruned**: thumbnails now live in `<user cache>/boozle/thumbs` (private, `0700`) instead of the shared temp directory, and entries unused for 30 days, or the oldest beyond 200 MB, are pruned in the background.
+- **One overview implementation**: audience and presenter windows share the same overview code. The preview pane renders the selected slide at full preview resolution (after a short debounce) instead of upscaling the thumbnail, and newly arrived thumbnails redraw only their own tile.
+- **Fade transition is a true crossfade**: the outgoing slide stays opaque underneath, so the background no longer shows through mid-fade.
+- **Speaker notes wrap by character, not byte**, and typographic characters outside the debug font (curly quotes, dashes, ellipses, bullets, €) are mapped to ASCII instead of disappearing.
 
 ### Fixed
 
+- **Fullscreen on the wrong monitor (Linux)**: the window was moved to the target monitor and switched to fullscreen in the same frame, but Ebitengine picks the fullscreen monitor from a cached, position-based guess that lags behind X11's asynchronous moves — so fullscreen often landed on the primary display. Placement now waits until the window is reported on the target monitor, verifies the result after the cache refreshes and retries once (`--debug-stats` logs every step). The initial window is sized to fit inside the target monitor so it opens centred there, and the presenter process is started only after the audience window is placed, so the two windows no longer race for the window manager.
+- **Explicit flags always win over the sidecar**: flags given on the command line now override sidecar values even when they equal the default — e.g. `--monitor 0`, `--start 1`, `--bg '#000000'`, `--loop=false` or `-P -1` (which now turns off a sidecar's presenter view).
+- **`l` returns to the right slide after any jump**: `Home`, `End` and page-number jumps now record the previous position too, and jumping to the slide that is already showing (e.g. `Home` on the first slide) no longer fades it into itself.
+- **Numpad digits** jump to pages from the audience window as well (previously only from presenter view).
+- **Invalid values are rejected**: an unknown `--transition` is now an error instead of silently meaning `none`, and absurd `--pages` ranges (beyond page 100000) are refused instead of exhausting memory.
+- **PDFium heap race**: rendered bitmaps were freed inside the PDFium WebAssembly module from the main thread while the prefetcher or thumbnail loader could be rendering on the same instance. `RenderPage` now copies pixels into a pooled Go buffer and frees the PDFium bitmap before releasing the document lock, so WASM memory is only touched under the lock and holds at most one bitmap at a time.
+- **Windows could not open PDFs**: go-pdfium rejects drive-letter paths inside WebAssembly. The PDF's directory is now mounted read-only at `/doc` in the sandbox (instead of the whole filesystem) and opened by a POSIX path.
+- **`--no-fullscreen` with presenter view**: the presenter window now honours it too, so `--no-fullscreen --monitor 0 --presenter-monitor 0` really opens two windows for one-monitor testing.
+- **macOS install note**: `install.sh` no longer tells you to strip a quarantine attribute that `curl` downloads never have (and that needed `sudo` in `/usr/local/bin`); it clears the attribute itself if present.
 - **Presenter overview duplicate work**: in presenter mode, the audience/master process no longer starts a thumbnail loader for overview content it does not draw; the presenter process owns the overview thumbnails it displays.
 
 ## [1.2.0] — 2026-05-05

@@ -83,20 +83,15 @@ DEST="${INSTALL_DIR}/boozle"
 log "installing to ${DEST}..."
 ${SUDO} install -m 0755 "$SRC" "$DEST"
 
+# curl does not set com.apple.quarantine, but strip it anyway in case the
+# archive arrived some other way (browser, AirDrop, proxy tooling).
+if [ "$GOOS" = "darwin" ]; then
+  ${SUDO} xattr -d com.apple.quarantine "$DEST" 2>/dev/null || true
+fi
+
 log "installed boozle ${VERSION} to ${DEST}"
 
 case ":${PATH}:" in
   *:"${INSTALL_DIR}":*) ;;
   *) log "note: ${INSTALL_DIR} is not on your \$PATH" ;;
 esac
-
-if [ "$GOOS" = "darwin" ]; then
-  cat <<EOF
-
-macOS Gatekeeper note:
-  If macOS blocks the unsigned binary on first run, strip the quarantine bit:
-
-    xattr -d com.apple.quarantine "${DEST}"
-
-EOF
-fi

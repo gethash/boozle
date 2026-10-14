@@ -75,12 +75,12 @@ Homebrew compiles from source locally, so macOS does not need the Gatekeeper qua
 curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
-The script detects your OS and architecture, downloads the right archive, verifies its SHA-256 against the release `checksums.txt`, and installs to `/usr/local/bin`. If that path is not writable, it falls back to `~/.local/bin`.
+The script detects your OS and architecture, downloads the right archive, verifies its SHA-256 against the release `checksums.txt`, and installs to `/usr/local/bin` (using `sudo` if that path is not writable; without `sudo` it falls back to `~/.local/bin`).
 
 Override the version or install directory with environment variables:
 
 ```bash
-BOOZLE_VERSION=v1.2.0 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.3.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
@@ -88,10 +88,12 @@ On Linux the binary needs the usual X11/OpenGL runtime libraries, which desktop 
 
 #### macOS First Run
 
-Boozle release binaries are currently unsigned. If macOS Gatekeeper blocks the first launch, remove the quarantine attribute once:
+Boozle release binaries are currently unsigned. The install script needs no extra step: `curl` downloads are not quarantined, and the script clears the attribute anyway.
+
+If you downloaded the archive with a browser instead, Gatekeeper may block the first launch. Remove the quarantine attribute once (prefix with `sudo` if the binary is in a root-owned directory such as `/usr/local/bin`):
 
 ```bash
-xattr -d com.apple.quarantine /usr/local/bin/boozle
+xattr -d com.apple.quarantine /path/to/boozle
 ```
 
 Code signing and notarisation are planned for a future release.

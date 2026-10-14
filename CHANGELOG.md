@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-14
+
 ### Added
 
 - **Release binaries for macOS Intel and Linux ARM64** (`darwin-amd64`, `linux-arm64`), which the installer already expected; every release build is smoke-tested with `--version`.
@@ -15,6 +17,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Overview opens in presenter view**: with presenter view on, `Tab` (from either window) opens the slide grid in the presenter window only; the audience keeps seeing the current slide until you pick one with Enter or a click.
 - **Overview thumbnails are cached across sessions and launches**: an in-process GPU cache plus a PNG disk cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run is immediate, and reopening the same unchanged deck reuses thumbnails without re-rendering them through PDFium.
 - **Large-deck overview drawing does less per frame**: overview precomputes grid cell rectangles, uses O(1) mouse hit testing instead of scanning every slide, caches the static thumbnail grid layer while active, and switches large decks to a simpler grid fade instead of animating every tile independently.
 - **PDF page sizes are read once at open**: `PageSize` no longer touches PDFium (or waits behind a render) after the document is opened.
@@ -42,6 +45,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **PDFium heap race**: rendered bitmaps were freed inside the PDFium WebAssembly module from the main thread while the prefetcher or thumbnail loader could be rendering on the same instance. `RenderPage` now copies pixels into a pooled Go buffer and frees the PDFium bitmap before releasing the document lock, so WASM memory is only touched under the lock and holds at most one bitmap at a time.
 - **Windows could not open PDFs**: go-pdfium rejects drive-letter paths inside WebAssembly. The PDF's directory is now mounted read-only at `/doc` in the sandbox (instead of the whole filesystem) and opened by a POSIX path.
 - **`--no-fullscreen` with presenter view**: the presenter window now honours it too, so `--no-fullscreen --monitor 0 --presenter-monitor 0` really opens two windows for one-monitor testing.
+- **macOS install note**: `install.sh` no longer tells you to strip a quarantine attribute that `curl` downloads never have (and that needed `sudo` in `/usr/local/bin`); it clears the attribute itself if present.
 - **Presenter overview duplicate work**: in presenter mode, the audience/master process no longer starts a thumbnail loader for overview content it does not draw; the presenter process owns the overview thumbnails it displays.
 
 ## [1.2.0] — 2026-05-05

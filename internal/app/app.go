@@ -31,7 +31,7 @@ const (
 	// initial value used before Layout has run. The user can override the
 	// auto sizing via --cache-mb (cfg.CacheMB > 0).
 	cacheBudgetMin     = 32 << 20  // 32 MB floor (small windows)
-	cacheBudgetMax     = 192 << 20 // 192 MB ceiling — past this, more pages don't help typical nav
+	cacheBudgetMax     = 192 << 20 // 192 MB ceiling of real GPU memory (3 pages at 4K)
 	cacheBudgetPages   = 4         // target ~4 pages worth at current bufW×bufH
 	cacheBudgetInitial = cacheBudgetMin
 
@@ -501,20 +501,23 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 		g.bufW = pxW
 		g.bufH = pxH
 		if g.pipe != nil {
-			g.pipe.resizeFor(pxW, pxH, g.cfg.CacheMB)
+			g.pipe.resized(autoBudget(pxW, pxH), g.cfg.CacheMB)
 		}
 	}
 	return pxW, pxH
 }
 
 // autoBudget sizes the GPU image cache to hold ~cacheBudgetPages full-buffer
-// pages, with a sensible floor for small windows and a ceiling for high-DPI
-// setups. The user can override entirely via --cache-mb.
+// pages (counted at their real texture size), with a floor for small
+// windows and a ceiling for high-DPI setups. The ceiling never drops below
+// three pages (current, next, previous), or 5K+ displays could not even
+// keep the next slide. The user can override entirely via --cache-mb.
 func autoBudget(bufW, bufH int) int {
 	if bufW <= 0 || bufH <= 0 {
 		return cacheBudgetMin
 	}
-	return min(cacheBudgetMax, max(cacheBudgetMin, bufW*bufH*4*cacheBudgetPages))
+	page := pdf.TextureBytes(bufW, bufH)
+	return min(max(cacheBudgetMax, 3*page), max(cacheBudgetMin, page*cacheBudgetPages))
 }
 
 func (g *Game) currentPage() int { return g.pageList[g.listIdx] }
@@ -562,14 +565,16 @@ func (g *Game) updatePrefetch() {
 		return
 	}
 	g.prefetchFor = sig
-	var deltas []int
-	switch {
-	case g.lastNavDir > 0:
-		deltas = []int{1, 2, 3, -1}
-	case g.lastNavDir < 0:
-		deltas = []int{-1, -2, -3, 1}
-	default:
-		deltas = []int{1, -1}
+	deltas := []int{1, -1}
+	if g.lastNavDir != 0 {
+		// Look further ahead in the direction of travel, as far as the
+		// cache can hold without evicting what we prefetched.
+		deltas = deltas[:0]
+		ahead := g.pipe.prefetchAhead(pdf.TextureBytes(g.bufW, g.bufH))
+		for d := 1; d <= ahead; d++ {
+			deltas = append(deltas, d*g.lastNavDir)
+		}
+		deltas = append(deltas, -g.lastNavDir)
 	}
 	var keys []pdf.CacheKey
 	for _, d := range deltas {

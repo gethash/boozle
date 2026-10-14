@@ -340,9 +340,19 @@ func (g *PresenterGame) Layout(outsideW, outsideH int) (int, int) {
 	if pxW != g.bufW || pxH != g.bufH {
 		g.bufW = pxW
 		g.bufH = pxH
-		g.pipe.resizeFor(pxW, pxH, g.opts.CacheMB)
+		g.pipe.resized(presenterBudget(g.presenterLayout()), g.opts.CacheMB)
 	}
 	return pxW, pxH
+}
+
+// presenterBudget sizes the presenter's slide cache from its pane sizes
+// rather than the full window: the current and next panes, what the next
+// advance needs (next at current size, the one after at next size), the
+// previous slide, and room for stand-ins and the overview preview.
+func presenterBudget(lo presenterLayout) int {
+	cur := pdf.TextureBytes(lo.currentContent.w, lo.currentContent.h)
+	next := pdf.TextureBytes(lo.nextContent.w, lo.nextContent.h)
+	return min(max(cacheBudgetMax, 2*cur+2*next), max(cacheBudgetMin, 3*cur+3*next))
 }
 
 type presenterRect struct {

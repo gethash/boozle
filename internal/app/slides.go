@@ -78,7 +78,10 @@ func (p *pipeline) drain() bool {
 	budget := uploadBytesPerFrame
 	n := p.sched.Drain(func(r pdf.Result) bool {
 		if r.Err == nil && r.RGBA != nil {
-			img := uploadRGBA(r.RGBA)
+			// Slides get their own textures so eviction really frees GPU
+			// memory; thumbnails share atlases so a grid of hundreds of
+			// them draws in a few batches.
+			img := uploadRGBA(r.RGBA, r.Kind == pdf.KindSlide)
 			budget -= len(r.RGBA.Pix)
 			if r.Kind == pdf.KindThumb {
 				p.thumbs.Put(r.Key, img)
@@ -161,13 +164,26 @@ func (p *pipeline) requestNow(key pdf.CacheKey) {
 	}
 }
 
-// resizeFor sizes the slide cache for a pixel buffer, unless --cache-mb
-// fixed it, and drops entries that no longer match.
-func (p *pipeline) resizeFor(bufW, bufH, cacheMB int) {
+// resized applies a new slide-cache budget (unless --cache-mb fixed it)
+// after the window's pixel buffer changed, and drops every render that
+// isn't on screen: all cached sizes derive from the old buffer. On-screen
+// entries are pinned and stand in until the new renders land.
+func (p *pipeline) resized(budget, cacheMB int) {
 	if cacheMB <= 0 {
-		p.slides.Resize(autoBudget(bufW, bufH))
+		p.slides.Resize(budget)
 	}
-	p.slides.PurgeNotMatching(bufW, bufH)
+	p.slides.PurgeExcept(func(pdf.CacheKey) bool { return false })
+}
+
+// prefetchAhead returns how many slides ahead to prefetch so that the
+// working set — current slide, one behind, the ones ahead — fits the
+// slide cache. Prefetching more than fits would evict renders before they
+// are shown.
+func (p *pipeline) prefetchAhead(slideBytes int) int {
+	if slideBytes <= 0 {
+		return 1
+	}
+	return min(3, max(1, p.slides.Budget()/slideBytes-2))
 }
 
 // pinnedSlide is a cache-owned image held on screen. The cache entry stays
@@ -198,9 +214,14 @@ func (s *pinnedSlide) release() {
 
 // uploadRGBA creates a GPU image at rgba's bounds and uploads the pixels via
 // WritePixels (which copies synchronously, so rgba may be recycled after).
-func uploadRGBA(rgba *image.RGBA) *ebiten.Image {
+//
+// Unmanaged images get a dedicated texture that Deallocate frees at once.
+// Managed images are packed into shared atlases, which are only released
+// when completely empty — fine for small images, but a pinned full-screen
+// slide could keep a whole 4096² atlas (64 MB) alive.
+func uploadRGBA(rgba *image.RGBA, unmanaged bool) *ebiten.Image {
 	b := rgba.Bounds()
-	eimg := ebiten.NewImage(b.Dx(), b.Dy())
+	eimg := ebiten.NewImageWithOptions(image.Rect(0, 0, b.Dx(), b.Dy()), &ebiten.NewImageOptions{Unmanaged: unmanaged})
 	eimg.WritePixels(rgba.Pix)
 	return eimg
 }

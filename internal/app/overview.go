@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"runtime/debug"
 	"sort"
 	"time"
 
@@ -182,6 +183,7 @@ func (ov *overview) attach(p *pipeline) {
 		ov.byPage[page] = append(ov.byPage[page], i)
 	}
 	p.onThumb = ov.receiveThumb
+	p.thumbs.fitTo(ov.thumbW, ov.thumbH, len(ov.byPage))
 	var background []pdf.Job
 	for i, page := range ov.pageList {
 		if ov.byPage[page][0] != i {
@@ -214,6 +216,9 @@ func (ov *overview) release(p *pipeline) {
 	if p != nil && ov.store != nil {
 		p.onThumb = nil
 		p.sched.ClearBackground()
+		// Thumbnail loading churns through pixel buffers and PNG decodes;
+		// hand that memory back to the OS once the overview is gone.
+		go debug.FreeOSMemory()
 	}
 	*ov = overview{}
 }
@@ -255,7 +260,7 @@ func (ov *overview) visibleJobs(p *pipeline, now time.Time) []pdf.Job {
 		}
 	}
 	var jobs []pdf.Job
-	if ov.selIdx != ov.fromIdx && now.Sub(ov.selChangedAt) >= overviewPreviewDelay {
+	if now.Sub(ov.selChangedAt) >= overviewPreviewDelay {
 		if key, ok := ov.previewKey(p, ov.selIdx); ok {
 			jobs = append(jobs, p.missing(key)...)
 		}
@@ -644,9 +649,10 @@ func (ov *overview) draw(screen *ebiten.Image, p *pipeline, cur *ebiten.Image, c
 	}
 }
 
-// previewImage picks the image for the left pane: the live slide for the
-// originating tile, else the best cached render of the selection (the
-// debounced preview-size render, or any other size), else its thumbnail.
+// previewImage picks the image for the left pane: the debounced
+// preview-size render of the selection if it is ready, else the live slide
+// for the originating tile, else any cached render of the selection, else
+// its thumbnail.
 func (ov *overview) previewImage(p *pipeline, cur *ebiten.Image) *ebiten.Image {
 	idx := ov.selIdx
 	switch ov.phase {
@@ -655,14 +661,21 @@ func (ov *overview) previewImage(p *pipeline, cur *ebiten.Image) *ebiten.Image {
 	case ovExiting:
 		idx = ov.exitToIdx
 	}
+	key, keyOK := pdf.CacheKey{}, false
+	if p != nil {
+		key, keyOK = ov.previewKey(p, idx)
+		if keyOK {
+			if img, ok := p.slides.Get(key); ok {
+				return img.(*ebiten.Image)
+			}
+		}
+	}
 	if idx == ov.fromIdx && cur != nil {
 		return cur
 	}
-	if p != nil {
-		if key, ok := ov.previewKey(p, idx); ok {
-			if img, _ := p.resolve(key); img != nil {
-				return img
-			}
+	if keyOK {
+		if img, _ := p.resolve(key); img != nil {
+			return img
 		}
 	}
 	if idx >= 0 && idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
@@ -703,6 +716,10 @@ func (ov *overview) drawPreview(screen *ebiten.Image, p *pipeline, cur *ebiten.I
 	op.GeoM.Scale(t.w/iw, t.h/ih)
 	op.GeoM.Translate(t.x, t.y)
 	op.Filter = ebiten.FilterLinear
+	// At rest the preview is drawn ~1:1 from its own render; strong
+	// downscales only happen during the short zoom animations, which don't
+	// justify a permanent mipmap chain (+33%) on full-screen slides.
+	op.DisableMipmaps = true
 	screen.DrawImage(img, op)
 }
 
@@ -724,7 +741,7 @@ func (ov *overview) drawGridLayer(screen *ebiten.Image) {
 		return
 	}
 	if ov.gridLayer == nil {
-		ov.gridLayer = ebiten.NewImage(r.w, r.h)
+		ov.gridLayer = ebiten.NewImageWithOptions(image.Rect(0, 0, r.w, r.h), &ebiten.NewImageOptions{Unmanaged: true})
 		ov.gridAll = true
 	}
 	ox, oy := float64(r.x), float64(r.y)

@@ -472,6 +472,7 @@ func TestPresenterModeOverviewDoesNotStartMasterThumbnails(t *testing.T) {
 }
 
 func TestOverviewDiskThumbCacheInvalidatesByPDFAndDimensions(t *testing.T) {
+	t.Setenv("BOOZLE_CACHE_DIR", t.TempDir())
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "deck.pdf")
 	if err := os.WriteFile(pdfPath, []byte("one"), 0o644); err != nil {
@@ -507,16 +508,22 @@ func TestAutoBudget(t *testing.T) {
 		t.Errorf("autoBudget(320,240) = %d, want floor %d", got, cacheBudgetMin)
 	}
 
-	// Mid-size: scales with bufW*bufH*4*cacheBudgetPages, clear of both floor and ceiling.
-	const w, h = 3840, 2160
-	want := w * h * 4 * cacheBudgetPages
+	// Mid-size: cacheBudgetPages textures (1080p → 2048² textures), clear
+	// of both floor and ceiling.
+	const w, h = 1920, 1080
+	want := pdf.TextureBytes(w, h) * cacheBudgetPages
 	if got := autoBudget(w, h); got != want {
 		t.Errorf("autoBudget(%d,%d) = %d, want %d", w, h, got, want)
 	}
 
-	// Huge buffer: clamps to ceiling.
-	if got := autoBudget(8192, 4608); got != cacheBudgetMax {
-		t.Errorf("autoBudget(8192,4608) = %d, want ceiling %d", got, cacheBudgetMax)
+	// 4K: clamps to the ceiling.
+	if got := autoBudget(3840, 2160); got != cacheBudgetMax {
+		t.Errorf("autoBudget(3840,2160) = %d, want ceiling %d", got, cacheBudgetMax)
+	}
+
+	// 5K and up: the ceiling yields to three pages.
+	if got, want := autoBudget(5120, 2880), 3*pdf.TextureBytes(5120, 2880); got != want {
+		t.Errorf("autoBudget(5120,2880) = %d, want three pages %d", got, want)
 	}
 
 	// Invalid input returns the floor without panicking.
@@ -599,5 +606,67 @@ func TestPresenterArgsForwardTuningFlags(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("args = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestPruneThumbDirByAgeAndSize(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	write := func(name string, size int, age time.Duration) {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mod := now.Add(-age)
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("expired.png", 10, 40*24*time.Hour)
+	write("oldest.png", 100, 3*time.Hour)
+	write("older.png", 100, 2*time.Hour)
+	write("newest.png", 100, time.Hour)
+	write("unrelated.txt", 1000, 90*24*time.Hour)
+
+	pruneThumbDir(dir, now, 30*24*time.Hour, 250)
+
+	for name, want := range map[string]bool{
+		"expired.png":   false, // too old
+		"oldest.png":    false, // LRU victim to get under 250 bytes
+		"older.png":     true,
+		"newest.png":    true,
+		"unrelated.txt": true, // only thumbnails are pruned
+	} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if got := err == nil; got != want {
+			t.Errorf("%s exists = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestPrefetchFitsCacheBudget checks that the slides kept around while
+// navigating — current, one behind and the prefetched ones ahead — fit the
+// automatic cache budget, so prefetched slides aren't evicted before use.
+func TestPrefetchFitsCacheBudget(t *testing.T) {
+	for _, sz := range [][2]int{{1280, 800}, {1920, 1080}, {2560, 1440}, {2880, 1800}, {3840, 2160}, {5120, 2880}} {
+		page := pdf.TextureBytes(sz[0], sz[1])
+		p := &pipeline{slides: pdf.NewCache(autoBudget(sz[0], sz[1]))}
+		ahead := p.prefetchAhead(page)
+		if need := (2 + ahead) * page; need > p.slides.Budget() {
+			t.Errorf("%dx%d: working set %d MB (ahead=%d) exceeds budget %d MB",
+				sz[0], sz[1], need>>20, ahead, p.slides.Budget()>>20)
+		}
+		if ahead < 1 {
+			t.Errorf("%dx%d: ahead = %d, want at least 1", sz[0], sz[1], ahead)
+		}
+	}
+}
+
+func TestPresenterBudgetCoversPanes(t *testing.T) {
+	lo := (&PresenterGame{bufW: 3840, bufH: 2160}).presenterLayout()
+	cur := pdf.TextureBytes(lo.currentContent.w, lo.currentContent.h)
+	next := pdf.TextureBytes(lo.nextContent.w, lo.nextContent.h)
+	if got := presenterBudget(lo); got < 2*cur+2*next {
+		t.Fatalf("presenterBudget = %d MB, want room for current+next panes and their prefetch (%d MB)", got>>20, (2*cur+2*next)>>20)
 	}
 }

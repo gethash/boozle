@@ -8,7 +8,7 @@ import (
 // CacheKey identifies a rasterized page at a specific pixel size.
 // Different (W, H) values are different cache entries — when the window
 // resizes or the active monitor's scale factor changes, the old entries
-// are stale and naturally fall out via the LRU.
+// are stale and get purged (see PurgeExcept).
 type CacheKey struct {
 	Page int
 	W, H int
@@ -36,7 +36,8 @@ type Cache struct {
 	maxBytes int
 	used     int
 	items    map[CacheKey]*cacheItem
-	order    *list.List // Front = least-recently-used, Back = most-recently-used
+	order    *list.List         // Front = least-recently-used, Back = most-recently-used
+	sizeOf   func(CacheKey) int // bytes charged per entry
 }
 
 // NewCache returns a cache that keeps rasterized pages within maxBytes.
@@ -50,6 +51,7 @@ func NewCache(maxBytes int) *Cache {
 		maxBytes: maxBytes,
 		items:    make(map[CacheKey]*cacheItem),
 		order:    list.New(),
+		sizeOf:   keyBytes,
 	}
 }
 
@@ -76,19 +78,23 @@ func (c *Cache) Has(k CacheKey) bool {
 }
 
 // Put inserts img at k as most-recently-used. If capacity is exceeded,
-// LRU entries are evicted and their images are Deallocate()d. If k already
-// exists, the previous entry's image is Deallocate()d before replacement.
-// Pinned entries (see Pin) are never evicted.
+// LRU entries are evicted and their images are Deallocate()d. Pinned
+// entries (see Pin) are never evicted.
+//
+// If k is already cached, the existing image wins (it may be on screen)
+// and img is Deallocate()d instead.
 func (c *Cache) Put(k CacheKey, img gpuImage) {
 	c.mu.Lock()
-	evicted := []gpuImage{}
 	if existing, ok := c.items[k]; ok {
-		evicted = append(evicted, existing.img)
-		c.used -= existing.bytes
-		c.order.Remove(existing.el)
-		delete(c.items, k)
+		c.order.MoveToBack(existing.el)
+		c.mu.Unlock()
+		if img != nil && img != existing.img {
+			img.Deallocate()
+		}
+		return
 	}
-	bytes := keyBytes(k)
+	var evicted []gpuImage
+	bytes := c.sizeOf(k)
 	it := &cacheItem{img: img, bytes: bytes}
 	it.el = c.order.PushBack(k)
 	c.items[k] = it
@@ -139,17 +145,18 @@ func (c *Cache) Resize(maxBytes int) {
 	}
 }
 
-// PurgeNotMatching evicts entries whose dimensions exceed (W, H). Entries
-// with smaller-or-equal dimensions are kept — they may still be useful as
-// scaled-down placeholders during a resize. Pinned entries are kept.
-func (c *Cache) PurgeNotMatching(W, H int) {
+// PurgeExcept evicts every unpinned entry for which keep returns false.
+// Used when the window size changes: every cached size is derived from the
+// old buffer, so only pinned (on-screen) entries are worth keeping — they
+// serve as scaled stand-ins until the new renders land.
+func (c *Cache) PurgeExcept(keep func(CacheKey) bool) {
 	c.mu.Lock()
 	var evicted []gpuImage
 	for el := c.order.Front(); el != nil; {
 		k := el.Value.(CacheKey)
 		next := el.Next()
 		it := c.items[k]
-		if it.pinCount == 0 && (k.W > W || k.H > H) {
+		if it.pinCount == 0 && !keep(k) {
 			evicted = append(evicted, it.img)
 			c.used -= it.bytes
 			c.order.Remove(el)
@@ -163,6 +170,13 @@ func (c *Cache) PurgeNotMatching(W, H int) {
 			im.Deallocate()
 		}
 	}
+}
+
+// Budget returns the current byte budget.
+func (c *Cache) Budget() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxBytes
 }
 
 // Range invokes f for each cached key in LRU→MRU order. f must not call
@@ -201,7 +215,7 @@ func (c *Cache) Len() int {
 	return len(c.items)
 }
 
-// Bytes returns the total bytes accounted to the cache (W*H*4 per entry).
+// Bytes returns the total bytes accounted to the cache (see TextureBytes).
 func (c *Cache) Bytes() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -234,9 +248,24 @@ func (c *Cache) evictLocked(evicted *[]gpuImage) {
 }
 
 func keyBytes(k CacheKey) int {
-	b := k.W * k.H * 4
-	if b < 1 {
-		return 1
+	return max(1, TextureBytes(k.W, k.H))
+}
+
+// TextureBytes is the GPU memory an image of w×h pixels actually occupies:
+// Ebitengine allocates textures with power-of-two sides (minimum 16), so a
+// 1280×720 slide takes a 2048×1024 texture. Budgeting with this size makes
+// the cache limit real GPU memory instead of undercounting it by up to 2×.
+func TextureBytes(w, h int) int {
+	if w <= 0 || h <= 0 {
+		return 0
 	}
-	return b
+	return pow2(w) * pow2(h) * 4
+}
+
+func pow2(x int) int {
+	r := 16
+	for r < x {
+		r <<= 1
+	}
+	return r
 }

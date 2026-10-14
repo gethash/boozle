@@ -33,8 +33,8 @@ func (s *statsReporter) tick(p *pipeline, listIdx int) {
 	u, v, pf, bg := p.sched.QueueLens()
 	renders, mean := p.sched.RenderStats()
 	fmt.Fprintf(os.Stderr,
-		"[boozle %s] slide=%d gpu=%s heap=%s sys=%s slides=%d/%s thumbs=%d/%s queue=u%d v%d p%d b%d renders=%d avg=%v\n",
-		s.role, listIdx+1, mb(di.TotalGPUImageMemoryUsageInBytes), mb(int64(ms.HeapInuse)), mb(int64(ms.Sys)),
+		"[boozle %s] slide=%d tps=%.0f fps=%.0f gpu=%s heap=%s sys=%s slides=%d/%s thumbs=%d/%s queue=u%d v%d p%d b%d renders=%d avg=%v\n",
+		s.role, listIdx+1, ebiten.ActualTPS(), ebiten.ActualFPS(), mb(di.TotalGPUImageMemoryUsageInBytes), mb(int64(ms.HeapInuse)), mb(int64(ms.Sys)),
 		p.slides.Len(), mb(int64(p.slides.Bytes())), p.thumbs.Len(), mb(int64(p.thumbs.Bytes())),
 		u, v, pf, bg, renders, mean.Round(100*time.Microsecond))
 }

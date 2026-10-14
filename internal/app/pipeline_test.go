@@ -32,6 +32,10 @@ func newTestPipeline(t *testing.T, pages int) *pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// After Open, so the compiled PDFium module still comes from the shared
+	// cache (compiling under -race takes ~10s) while thumbnails stay
+	// hermetic.
+	t.Setenv("BOOZLE_CACHE_DIR", t.TempDir())
 	p := newPipeline(doc, path, 0)
 	t.Cleanup(func() {
 		p.close()

@@ -19,6 +19,31 @@ func (f *fakeImg) Deallocate() {
 
 func newFake(counter *atomic.Int32) *fakeImg { return &fakeImg{deallocated: counter} }
 
+// newTestCache charges W*H*4 bytes per entry (no power-of-two texture
+// rounding) so tests can reason about tiny budgets.
+func newTestCache(maxBytes int) *Cache {
+	c := NewCache(maxBytes)
+	c.sizeOf = func(k CacheKey) int { return max(1, k.W*k.H*4) }
+	return c
+}
+
+func TestTextureBytesRoundsToPowerOfTwo(t *testing.T) {
+	for _, tt := range []struct{ w, h, want int }{
+		{1280, 720, 2048 * 1024 * 4},
+		{3840, 2160, 4096 * 4096 * 4},
+		{1, 1, 16 * 16 * 4},
+		{1024, 1024, 1024 * 1024 * 4},
+		{0, 10, 0},
+	} {
+		if got := TextureBytes(tt.w, tt.h); got != tt.want {
+			t.Errorf("TextureBytes(%d,%d) = %d, want %d", tt.w, tt.h, got, tt.want)
+		}
+	}
+	if got := NewCache(1).sizeOf(CacheKey{W: 1280, H: 720}); got != TextureBytes(1280, 720) {
+		t.Errorf("default cache charges %d bytes for 1280x720, want texture size", got)
+	}
+}
+
 // keyAt returns a CacheKey with W*H*4 == bytes.
 // W=H=sqrt(bytes/4) for clean accounting in tests.
 func keyAt(page, pixelsW, pixelsH int) CacheKey {
@@ -26,7 +51,7 @@ func keyAt(page, pixelsW, pixelsH int) CacheKey {
 }
 
 func TestCachePutGet(t *testing.T) {
-	c := NewCache(64)
+	c := newTestCache(64)
 	k := keyAt(0, 1, 1) // 4 bytes
 	img := newFake(nil)
 	c.Put(k, img)
@@ -44,7 +69,7 @@ func TestCachePutGet(t *testing.T) {
 }
 
 func TestCacheLRUEviction(t *testing.T) {
-	c := NewCache(8)
+	c := newTestCache(8)
 	var freed atomic.Int32
 
 	k1 := keyAt(1, 1, 1) // 4 bytes
@@ -75,23 +100,28 @@ func TestCacheLRUEviction(t *testing.T) {
 	}
 }
 
-func TestCacheReplaceDeallocatesOld(t *testing.T) {
-	c := NewCache(64)
+func TestCachePutExistingKeepsCachedImage(t *testing.T) {
+	c := newTestCache(64)
 	var freed atomic.Int32
 
 	k := keyAt(1, 2, 2) // 16 bytes
-	c.Put(k, newFake(&freed))
+	first := newFake(&freed)
+	c.Put(k, first)
+	c.Pin(k) // e.g. on screen
 	c.Put(k, newFake(&freed))
 	if got := freed.Load(); got != 1 {
-		t.Errorf("replace: Deallocate count = %d, want 1 (old only)", got)
+		t.Errorf("duplicate Put: Deallocate count = %d, want 1 (the duplicate only)", got)
+	}
+	if got, _ := c.Get(k); got != gpuImage(first) {
+		t.Error("duplicate Put must not replace the cached (possibly pinned) image")
 	}
 	if got := c.Bytes(); got != 16 {
-		t.Errorf("Bytes after replace = %d, want 16", got)
+		t.Errorf("Bytes after duplicate Put = %d, want 16", got)
 	}
 }
 
 func TestCacheClearDeallocatesAll(t *testing.T) {
-	c := NewCache(64)
+	c := newTestCache(64)
 	var freed atomic.Int32
 	for i := 0; i < 3; i++ {
 		c.Put(keyAt(i, 1, 1), newFake(&freed))
@@ -109,7 +139,7 @@ func TestCacheClearDeallocatesAll(t *testing.T) {
 }
 
 func TestCacheByteBudgetWithDifferentImageSizes(t *testing.T) {
-	c := NewCache(20)
+	c := newTestCache(20)
 	var freed atomic.Int32
 
 	small := keyAt(1, 1, 1) // 4 bytes
@@ -140,7 +170,7 @@ func TestCacheByteBudgetWithDifferentImageSizes(t *testing.T) {
 }
 
 func TestCacheOversizedNewestItemIsRetained(t *testing.T) {
-	c := NewCache(4)
+	c := newTestCache(4)
 	var freed atomic.Int32
 
 	c.Put(keyAt(1, 1, 1), newFake(&freed)) // 4 bytes — fits
@@ -162,7 +192,7 @@ func TestCacheOversizedNewestItemIsRetained(t *testing.T) {
 }
 
 func TestCacheConcurrentAccess(t *testing.T) {
-	c := NewCache(32)
+	c := newTestCache(32)
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -180,7 +210,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 }
 
 func TestCachePinPreventsEviction(t *testing.T) {
-	c := NewCache(8)
+	c := newTestCache(8)
 	var freed atomic.Int32
 
 	k1 := keyAt(1, 1, 1) // 4 bytes
@@ -216,7 +246,7 @@ func TestCachePinPreventsEviction(t *testing.T) {
 }
 
 func TestCacheResizeShrinksAndEvicts(t *testing.T) {
-	c := NewCache(32)
+	c := newTestCache(32)
 	var freed atomic.Int32
 	for i := 0; i < 4; i++ {
 		c.Put(keyAt(i, 2, 1), newFake(&freed)) // 8 bytes each
@@ -235,30 +265,29 @@ func TestCacheResizeShrinksAndEvicts(t *testing.T) {
 	}
 }
 
-func TestCachePurgeNotMatching(t *testing.T) {
-	// Budget large enough to hold all three so the LRU doesn't pre-evict.
-	c := NewCache(2048)
+func TestCachePurgeExceptKeepsPinnedAndKept(t *testing.T) {
+	c := newTestCache(1 << 20)
 	var freed atomic.Int32
-	small := keyAt(1, 2, 2)   // 16 bytes
-	medium := keyAt(2, 4, 4)  // 64 bytes
-	large := keyAt(3, 8, 8)   // 256 bytes
+	pinned := keyAt(1, 8, 8)
+	kept := keyAt(2, 4, 4)
+	dropped := keyAt(3, 2, 2)
+	c.Put(pinned, newFake(&freed))
+	c.Put(kept, newFake(&freed))
+	c.Put(dropped, newFake(&freed))
+	c.Pin(pinned)
 
-	c.Put(small, newFake(&freed))
-	c.Put(medium, newFake(&freed))
-	c.Put(large, newFake(&freed))
+	c.PurgeExcept(func(k CacheKey) bool { return k == kept })
 
-	c.PurgeNotMatching(4, 4) // keeps small (2×2) and medium (4×4); evicts large (8×8)
-
-	if !c.Has(small) {
-		t.Error("small (≤limit) should be retained")
+	if !c.Has(pinned) || !c.Has(kept) {
+		t.Error("pinned and kept entries must survive PurgeExcept")
 	}
-	if !c.Has(medium) {
-		t.Error("medium (==limit) should be retained")
-	}
-	if c.Has(large) {
-		t.Error("large (>limit) should be purged")
+	if c.Has(dropped) {
+		t.Error("unpinned, unkept entry should be purged")
 	}
 	if got := freed.Load(); got != 1 {
 		t.Errorf("Purge Deallocate count = %d, want 1", got)
+	}
+	if got := c.Bytes(); got != 8*8*4+4*4*4 {
+		t.Errorf("Bytes after purge = %d", got)
 	}
 }

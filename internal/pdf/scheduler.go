@@ -30,6 +30,12 @@ type Result struct {
 	Err     error
 }
 
+// maxPendingBytes bounds the pixels of finished renders waiting to be
+// drained. The main goroutine uploads about one full-screen slide per
+// frame, so rendering further ahead only holds more large buffers alive
+// (a 4K slide is ~33 MB). Small results (thumbnails) still stream freely.
+const maxPendingBytes = 32 << 20
+
 // LoadFunc produces the pixels for a job. It runs on the scheduler's worker
 // goroutine.
 type LoadFunc func(Job) (*image.RGBA, func(), error)
@@ -60,10 +66,12 @@ type Scheduler struct {
 	bgSet       map[Job]struct{}
 	outstanding map[Job]struct{} // in flight or waiting in results
 
-	wake    chan struct{}
-	results chan Result
-	stop    chan struct{}
-	wg      sync.WaitGroup
+	wake         chan struct{}
+	results      chan Result
+	drained      chan struct{} // signalled when Drain frees pending bytes
+	pendingBytes int           // guarded by mu
+	stop         chan struct{}
+	wg           sync.WaitGroup
 
 	statsMu    sync.Mutex
 	renders    int
@@ -81,7 +89,8 @@ func NewScheduler(load LoadFunc, skip func(Job) bool) *Scheduler {
 		bgSet:       make(map[Job]struct{}),
 		outstanding: make(map[Job]struct{}),
 		wake:        make(chan struct{}, 1),
-		results:     make(chan Result, 4),
+		results:     make(chan Result, 64),
+		drained:     make(chan struct{}, 1),
 		stop:        make(chan struct{}),
 	}
 }
@@ -172,7 +181,12 @@ func (s *Scheduler) Drain(fn func(Result) bool) int {
 		case r := <-s.results:
 			s.mu.Lock()
 			delete(s.outstanding, r.Job)
+			s.pendingBytes -= resultBytes(r)
 			s.mu.Unlock()
+			select {
+			case s.drained <- struct{}{}:
+			default:
+			}
 			n++
 			if !fn(r) {
 				return n
@@ -273,8 +287,15 @@ func (s *Scheduler) worker() {
 		s.renders++
 		s.renderTime += time.Since(start)
 		s.statsMu.Unlock()
+		r := Result{Job: j, RGBA: rgba, Release: release, Err: err}
+		if !s.waitForRoom(resultBytes(r)) {
+			if release != nil {
+				release()
+			}
+			return
+		}
 		select {
-		case s.results <- Result{Job: j, RGBA: rgba, Release: release, Err: err}:
+		case s.results <- r:
 		case <-s.stop:
 			if release != nil {
 				release()
@@ -282,4 +303,31 @@ func (s *Scheduler) worker() {
 			return
 		}
 	}
+}
+
+// waitForRoom blocks until a result of size bytes fits the pending budget
+// (an empty queue always has room) and reserves it. It returns false if the
+// scheduler is stopping.
+func (s *Scheduler) waitForRoom(size int) bool {
+	for {
+		s.mu.Lock()
+		if s.pendingBytes == 0 || s.pendingBytes+size <= maxPendingBytes {
+			s.pendingBytes += size
+			s.mu.Unlock()
+			return true
+		}
+		s.mu.Unlock()
+		select {
+		case <-s.drained:
+		case <-s.stop:
+			return false
+		}
+	}
+}
+
+func resultBytes(r Result) int {
+	if r.RGBA == nil {
+		return 0
+	}
+	return len(r.RGBA.Pix)
 }

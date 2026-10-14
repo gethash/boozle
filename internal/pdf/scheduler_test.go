@@ -165,3 +165,22 @@ func TestSchedulerStopReleasesUndelivered(t *testing.T) {
 		t.Fatalf("released %d buffers on Stop, want 2", released)
 	}
 }
+
+func TestSchedulerBoundsPendingResultBytes(t *testing.T) {
+	big := func(j Job) (*image.RGBA, func(), error) {
+		return image.NewRGBA(image.Rect(0, 0, 2048, 2048)), nil, nil // 16 MB
+	}
+	s := NewScheduler(big, nil)
+	s.Start()
+	defer s.Stop()
+	s.SetPrefetch([]Job{slide(1), slide(2), slide(3), slide(4)})
+
+	time.Sleep(100 * time.Millisecond)
+	if got := len(s.results); got != 2 {
+		t.Fatalf("undrained 16 MB results = %d, want 2 (32 MB pending budget)", got)
+	}
+	got := waitDrain(t, s, 4)
+	if len(got) != 4 {
+		t.Fatalf("drained %d results, want all 4 once room frees up", len(got))
+	}
+}

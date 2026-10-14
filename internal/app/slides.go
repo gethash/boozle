@@ -3,11 +3,19 @@ package app
 import (
 	"image"
 	"math"
+	"runtime"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
 	"github.com/gethash/boozle/internal/pdf"
 )
+
+// gcAfterUploadBytes triggers a background GC after this many uploaded
+// bytes. Ebitengine copies every upload into a staging buffer that only
+// returns to its reuse pool once the garbage collector has run; without a
+// nudge, each full-screen slide uploaded between collections allocates a
+// fresh ~30 MB buffer that the pool then keeps for good.
+const gcAfterUploadBytes = 32 << 20
 
 // uploadBytesPerFrame bounds how many rendered pixel bytes are uploaded to
 // the GPU per frame: roughly one 4K slide, or a screenful of thumbnails.
@@ -27,6 +35,8 @@ type pipeline struct {
 	// onThumb is called for every freshly uploaded thumbnail (set while an
 	// overview is open).
 	onThumb func(pdf.CacheKey, *ebiten.Image)
+
+	uploadedSinceGC int
 }
 
 func newPipeline(doc *pdf.Doc, pdfPath string, cacheMB int) *pipeline {
@@ -97,6 +107,11 @@ func (p *pipeline) drain() bool {
 		}
 		return budget > 0
 	})
+	p.uploadedSinceGC += uploadBytesPerFrame - budget
+	if p.uploadedSinceGC >= gcAfterUploadBytes {
+		p.uploadedSinceGC = 0
+		go runtime.GC()
+	}
 	return n > 0
 }
 

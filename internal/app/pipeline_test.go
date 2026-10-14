@@ -49,12 +49,26 @@ func newTestPipeline(t *testing.T, pages int) *pipeline {
 // screen at its exact size — i.e. async renders, stand-ins and transition
 // gating never stall navigation.
 func TestAutoAdvanceShowsEveryPage(t *testing.T) {
+	testAutoAdvanceShowsEveryPage(t, 0)
+}
+
+// TestTinyCacheStillShowsEveryPage guards against a fresh render being
+// evicted by its own insertion when the pinned on-screen slide already
+// fills the budget (e.g. a small --cache-mb on a 4K display).
+func TestTinyCacheStillShowsEveryPage(t *testing.T) {
+	testAutoAdvanceShowsEveryPage(t, 1)
+}
+
+func testAutoAdvanceShowsEveryPage(t *testing.T, cacheMB int) {
 	const pages = 6
 	p := newTestPipeline(t, pages)
+	if cacheMB > 0 {
+		p.slides.Resize(cacheMB << 20)
+	}
 	auto := timer.New(40*time.Millisecond, nil)
 	auto.Reset(1)
 	g := &Game{
-		cfg:      config.Config{Loop: true},
+		cfg:      config.Config{Loop: true, CacheMB: cacheMB},
 		pipe:     p,
 		auto:     auto,
 		pageList: []int{0, 1, 2, 3, 4, 5},

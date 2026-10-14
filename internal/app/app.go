@@ -27,7 +27,7 @@ var ErrQuit = errors.New("boozle: quit")
 
 const (
 	// Cache budgets are sized at runtime by autoBudget(bufW, bufH) — see
-	// pipeline.resizeFor. The constants here are floor/ceiling and the
+	// pipeline.resized. The constants here are floor/ceiling and the
 	// initial value used before Layout has run. The user can override the
 	// auto sizing via --cache-mb (cfg.CacheMB > 0).
 	cacheBudgetMin     = 32 << 20  // 32 MB floor (small windows)

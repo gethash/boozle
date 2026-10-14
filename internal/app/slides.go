@@ -94,9 +94,9 @@ func (p *pipeline) drain() bool {
 			img := uploadRGBA(r.RGBA, r.Kind == pdf.KindSlide)
 			budget -= len(r.RGBA.Pix)
 			if r.Kind == pdf.KindThumb {
-				p.thumbs.Put(r.Key, img)
+				kept := p.thumbs.Put(r.Key, img)
 				if p.onThumb != nil {
-					p.onThumb(r.Key, img)
+					p.onThumb(r.Key, kept)
 				}
 			} else {
 				p.slides.Put(r.Key, img)

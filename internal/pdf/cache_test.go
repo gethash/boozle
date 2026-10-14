@@ -291,3 +291,32 @@ func TestCachePurgeExceptKeepsPinnedAndKept(t *testing.T) {
 		t.Errorf("Bytes after purge = %d", got)
 	}
 }
+
+// TestCachePutNeverEvictsTheNewEntry covers a budget smaller than the
+// pinned on-screen slide plus a new one: the new render must survive its
+// own Put (exceeding the budget) instead of being discarded unseen.
+func TestCachePutNeverEvictsTheNewEntry(t *testing.T) {
+	c := newTestCache(20)
+	var freed atomic.Int32
+	shown := keyAt(1, 2, 2) // 16 bytes
+	c.Put(shown, newFake(&freed))
+	c.Pin(shown)
+
+	next := keyAt(2, 2, 2) // 16 bytes: 32 > 20
+	img := newFake(&freed)
+	if got := c.Put(next, img); got != gpuImage(img) {
+		t.Fatal("Put should return the inserted image")
+	}
+	if !c.Has(next) || !c.Has(shown) {
+		t.Fatalf("pinned and freshly inserted entries must both survive (has shown=%v next=%v)", c.Has(shown), c.Has(next))
+	}
+	if freed.Load() != 0 {
+		t.Fatalf("Deallocate count = %d, want 0", freed.Load())
+	}
+
+	// The next insert may evict the previous unpinned one.
+	c.Put(keyAt(3, 2, 2), newFake(&freed))
+	if c.Has(next) || freed.Load() != 1 {
+		t.Fatalf("older unpinned entry should now be evicted (has=%v freed=%d)", c.Has(next), freed.Load())
+	}
+}

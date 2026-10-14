@@ -41,8 +41,9 @@ type Cache struct {
 }
 
 // NewCache returns a cache that keeps rasterized pages within maxBytes.
-// If one image is larger than maxBytes, the cache retains that newest image
-// alone so the active slide is not immediately discarded.
+// Pinned entries and the entry just inserted are never evicted, so the cache
+// may exceed maxBytes when they alone don't fit — a freshly rendered slide
+// is not discarded before it can be shown.
 func NewCache(maxBytes int) *Cache {
 	if maxBytes < 1 {
 		maxBytes = 1
@@ -77,13 +78,14 @@ func (c *Cache) Has(k CacheKey) bool {
 	return ok
 }
 
-// Put inserts img at k as most-recently-used. If capacity is exceeded,
-// LRU entries are evicted and their images are Deallocate()d. Pinned
-// entries (see Pin) are never evicted.
+// Put inserts img at k as most-recently-used and returns the image now
+// cached at k. If capacity is exceeded, older unpinned entries are evicted
+// and their images are Deallocate()d; img itself is never evicted by its
+// own Put.
 //
-// If k is already cached, the existing image wins (it may be on screen)
-// and img is Deallocate()d instead.
-func (c *Cache) Put(k CacheKey, img gpuImage) {
+// If k is already cached, the existing image wins (it may be on screen),
+// img is Deallocate()d instead, and the existing image is returned.
+func (c *Cache) Put(k CacheKey, img gpuImage) gpuImage {
 	c.mu.Lock()
 	if existing, ok := c.items[k]; ok {
 		c.order.MoveToBack(existing.el)
@@ -91,7 +93,7 @@ func (c *Cache) Put(k CacheKey, img gpuImage) {
 		if img != nil && img != existing.img {
 			img.Deallocate()
 		}
-		return
+		return existing.img
 	}
 	var evicted []gpuImage
 	bytes := c.sizeOf(k)
@@ -99,13 +101,14 @@ func (c *Cache) Put(k CacheKey, img gpuImage) {
 	it.el = c.order.PushBack(k)
 	c.items[k] = it
 	c.used += bytes
-	c.evictLocked(&evicted)
+	c.evictLocked(&evicted, it.el)
 	c.mu.Unlock()
 	for _, im := range evicted {
 		if im != nil {
 			im.Deallocate()
 		}
 	}
+	return img
 }
 
 // Pin marks the entry as protected from eviction. Multiple calls increment
@@ -136,7 +139,7 @@ func (c *Cache) Resize(maxBytes int) {
 	c.mu.Lock()
 	c.maxBytes = maxBytes
 	var evicted []gpuImage
-	c.evictLocked(&evicted)
+	c.evictLocked(&evicted, nil)
 	c.mu.Unlock()
 	for _, im := range evicted {
 		if im != nil {
@@ -180,8 +183,8 @@ func (c *Cache) Budget() int {
 }
 
 // Range invokes f for each cached key in LRU→MRU order. f must not call
-// other cache methods (re-entrancy will deadlock). Useful for mipmap-style
-// scans.
+// other cache methods (re-entrancy will deadlock). Used to find same-page
+// stand-ins of other sizes.
 func (c *Cache) Range(f func(k CacheKey)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -223,14 +226,14 @@ func (c *Cache) Bytes() int {
 }
 
 // evictLocked drops entries from the LRU front until used <= maxBytes,
-// skipping pinned entries and always retaining at least one entry. Callers
+// skipping pinned entries and protect (the entry being inserted). Callers
 // must hold c.mu.
-func (c *Cache) evictLocked(evicted *[]gpuImage) {
+func (c *Cache) evictLocked(evicted *[]gpuImage, protect *list.Element) {
 	for c.used > c.maxBytes && c.order.Len() > 1 {
 		var victim *list.Element
 		for el := c.order.Front(); el != nil; el = el.Next() {
 			k := el.Value.(CacheKey)
-			if c.items[k].pinCount == 0 {
+			if el != protect && c.items[k].pinCount == 0 {
 				victim = el
 				break
 			}

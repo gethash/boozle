@@ -83,10 +83,13 @@ func (s *overviewThumbStore) Has(key pdf.CacheKey) bool {
 	return s != nil && s.gpu != nil && s.gpu.Has(key)
 }
 
-func (s *overviewThumbStore) Put(key pdf.CacheKey, img *ebiten.Image) {
-	if s != nil && s.gpu != nil && img != nil {
-		s.gpu.Put(key, img)
+// Put caches img and returns the image now cached at key (an existing
+// one wins over img).
+func (s *overviewThumbStore) Put(key pdf.CacheKey, img *ebiten.Image) *ebiten.Image {
+	if s == nil || s.gpu == nil || img == nil {
+		return img
 	}
+	return s.gpu.Put(key, img).(*ebiten.Image)
 }
 
 func (s *overviewThumbStore) Pin(key pdf.CacheKey) {

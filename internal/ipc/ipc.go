@@ -88,6 +88,10 @@ type Server struct {
 	hello     Hello
 	lastState *PresenterState
 	commands  chan PresenterCommand
+
+	// wmu orders writes: the connect-time replay (Hello + last state) must
+	// reach the presenter before any state sent afterwards.
+	wmu sync.Mutex
 }
 
 // Listen creates a socket in a fresh private directory and returns a ready
@@ -121,16 +125,17 @@ func (s *Server) Accept() {
 	if err != nil {
 		return
 	}
+	s.wmu.Lock()
 	s.mu.Lock()
 	s.conn = conn
 	hello := s.hello
 	last := s.lastState
 	s.mu.Unlock()
-
 	s.write(conn, message{Hello: &hello})
 	if last != nil {
 		s.write(conn, message{State: last})
 	}
+	s.wmu.Unlock()
 	go s.readCommands(conn)
 }
 
@@ -147,7 +152,9 @@ func (s *Server) Send(st PresenterState) {
 	conn := s.conn
 	s.mu.Unlock()
 	if conn != nil {
+		s.wmu.Lock()
 		s.write(conn, message{State: &st})
+		s.wmu.Unlock()
 	}
 }
 
@@ -212,6 +219,7 @@ type Receiver struct {
 	mu       sync.Mutex
 	hello    Hello
 	hasHello bool
+	hasState bool
 	state    PresenterState
 	received time.Time
 	seq      uint64
@@ -235,6 +243,13 @@ func (r *Receiver) Hello() (Hello, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.hello, r.hasHello
+}
+
+// Ready reports whether both the Hello and a first state have arrived.
+func (r *Receiver) Ready() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hasHello && r.hasState
 }
 
 // Latest returns the most recent state, when it was received, and a sequence
@@ -273,6 +288,7 @@ func (r *Receiver) readLoop(conn net.Conn, onDisconnect func()) {
 		if m.State != nil {
 			r.state = *m.State
 			r.received = time.Now()
+			r.hasState = true
 		}
 		r.seq++
 		r.mu.Unlock()

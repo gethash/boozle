@@ -163,14 +163,6 @@ func (s *Scheduler) ClearBackground() {
 	s.mu.Unlock()
 }
 
-// Outstanding reports whether j is being rendered or awaits draining.
-func (s *Scheduler) Outstanding(j Job) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.outstanding[j]
-	return ok
-}
-
 // Drain hands finished results to fn on the calling goroutine until the
 // results channel is empty or fn returns false. It returns how many results
 // were handled. fn owns r.Release.
@@ -180,7 +172,6 @@ func (s *Scheduler) Drain(fn func(Result) bool) int {
 		select {
 		case r := <-s.results:
 			s.mu.Lock()
-			delete(s.outstanding, r.Job)
 			s.pendingBytes -= resultBytes(r)
 			s.mu.Unlock()
 			select {
@@ -188,7 +179,13 @@ func (s *Scheduler) Drain(fn func(Result) bool) int {
 			default:
 			}
 			n++
-			if !fn(r) {
+			more := fn(r)
+			// Only now is the result in its cache; clearing outstanding
+			// earlier would let the worker start the same job again.
+			s.mu.Lock()
+			delete(s.outstanding, r.Job)
+			s.mu.Unlock()
+			if !more {
 				return n
 			}
 		default:

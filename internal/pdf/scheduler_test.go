@@ -60,7 +60,7 @@ func TestSchedulerNeverStartsOutstandingJobTwice(t *testing.T) {
 	if j, ok := s.next(); ok {
 		t.Fatalf("next() = %v, want nothing while job is outstanding", j)
 	}
-	if !s.Outstanding(slide(1)) {
+	if _, ok := s.outstanding[slide(1)]; !ok {
 		t.Fatal("job should be outstanding")
 	}
 }
@@ -124,7 +124,7 @@ func TestSchedulerDeliversEachResultOnce(t *testing.T) {
 	if calls.Load() != 3 {
 		t.Errorf("load called %d times, want 3", calls.Load())
 	}
-	if s.Outstanding(slide(1)) {
+	if _, ok := s.outstanding[slide(1)]; ok {
 		t.Error("drained job should no longer be outstanding")
 	}
 }

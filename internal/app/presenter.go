@@ -162,7 +162,7 @@ func (g *PresenterGame) Update() error {
 		g.hello, g.hasHello = g.receiver.Hello()
 	}
 	st, _, _ := g.receiver.Latest()
-	if g.hasHello && len(g.hello.PageList) > 0 && g.bufW > 0 && g.bufH > 0 {
+	if g.hasHello && g.receiver.Ready() && len(g.hello.PageList) > 0 && g.bufW > 0 && g.bufH > 0 {
 		g.syncOverview(st)
 		g.refreshPanes(st)
 	}

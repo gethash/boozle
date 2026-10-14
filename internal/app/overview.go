@@ -478,6 +478,9 @@ func overviewLoadOrder(n, center, include, cols int) []int {
 // openOverview lays out the overview. Thumbnails are only loaded when this
 // window draws the overview (i.e. no presenter process owns it).
 func (g *Game) openOverview() {
+	// Finish any running slide transition; it would otherwise stay frozen
+	// (and its outgoing slide pinned) for as long as the overview is open.
+	g.trans.clear()
 	g.ov = newOverview(g.pageList, g.bufW, g.bufH, g.listIdx)
 	if g.shouldDrawOverviewOnAudience() && g.pipe != nil {
 		g.ov.attach(g.pipe)
@@ -596,7 +599,7 @@ func (g *Game) relayoutOverview() {
 	g.ov = newOverview(g.pageList, g.bufW, g.bufH, old.fromIdx)
 	g.ov.phase, g.ov.anim = old.phase, old.anim
 	g.ov.selIdx, g.ov.exitToIdx = old.selIdx, old.exitToIdx
-	if attached {
+	if attached && g.ov.phase != ovExiting {
 		g.ov.attach(g.pipe)
 	}
 }

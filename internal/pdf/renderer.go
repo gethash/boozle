@@ -4,6 +4,11 @@
 // The PDFium WASM blob is embedded by go-pdfium itself (no need for us to
 // embed it again), and wazero is pure Go — so this package compiles with
 // CGO_ENABLED=0 and contributes nothing to the binary's dynamic dependencies.
+//
+// Pixels returned by RenderPage are Go-owned copies: the PDFium bitmap is
+// destroyed before RenderPage returns, so callers never hold views into the
+// WASM linear memory (which is not goroutine-safe and is invalidated when
+// the module's memory grows).
 package pdf
 
 import (
@@ -18,7 +23,13 @@ import (
 	"github.com/klippa-app/go-pdfium/references"
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/webassembly"
+	"github.com/tetratelabs/wazero"
 )
+
+// docMount is where the PDF's directory is mounted inside the WASM sandbox.
+// go-pdfium cannot open Windows volume paths (C:\...), so we always mount
+// the containing directory read-only and open the file by a POSIX path.
+const docMount = "/doc"
 
 // Doc is an opened PDF, ready to render. A Doc owns a single PDFium worker
 // instance; calls are serialized via mu because PDFium instances are not
@@ -53,10 +64,16 @@ func (p Page) AspectRatio() float64 {
 // Open initializes a PDFium WASM worker pool, loads the file at path,
 // and prepares it for rendering. The caller must call Close.
 func Open(path string) (*Doc, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", path, err)
+	}
+
 	pool, err := webassembly.Init(webassembly.Config{
 		MinIdle:  1,
 		MaxIdle:  1,
 		MaxTotal: 1,
+		FSConfig: wazero.NewFSConfig().WithReadOnlyDirMount(filepath.Dir(absPath), docMount),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pdfium init: %w", err)
@@ -68,14 +85,8 @@ func Open(path string) (*Doc, error) {
 		return nil, fmt.Errorf("pdfium instance: %w", err)
 	}
 
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		_ = instance.Close()
-		_ = pool.Close()
-		return nil, fmt.Errorf("resolve %s: %w", path, err)
-	}
-
-	open, err := instance.OpenDocument(&requests.OpenDocument{FilePath: &absPath})
+	wasmPath := docMount + "/" + filepath.Base(absPath)
+	open, err := instance.OpenDocument(&requests.OpenDocument{FilePath: &wasmPath})
 	if err != nil {
 		_ = instance.Close()
 		_ = pool.Close()
@@ -135,9 +146,13 @@ func (d *Doc) PageSize(idx int) (Page, error) {
 	return page, nil
 }
 
-// RenderPage rasterizes page idx (0-indexed) at exactly width × height pixels.
-// The returned cleanup function MUST be called when the image is no longer
-// needed, to release WebAssembly-side memory.
+// RenderPage rasterizes page idx (0-indexed) to fit inside width × height
+// pixels (PDFium aspect-fits, so the result may be smaller on one axis).
+//
+// The returned image owns its pixels; the PDFium bitmap is already freed.
+// The release function hands the pixel buffer back to a pool for reuse; it
+// is optional, safe to call from any goroutine, and the image must not be
+// used afterwards.
 func (d *Doc) RenderPage(idx, width, height int) (*image.RGBA, func(), error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -160,8 +175,17 @@ func (d *Doc) RenderPage(idx, width, height int) (*image.RGBA, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("render page %d: %w", idx, err)
 	}
-	cleanup := func() { resp.Cleanup() }
-	return resp.Result.Image, cleanup, nil
+	// Copy out of WASM memory and free the bitmap while still holding the
+	// lock: dlmalloc inside the module is not goroutine-safe, and the view
+	// returned by go-pdfium detaches once the module's memory grows.
+	view := resp.Result.Image
+	buf := getPix(len(view.Pix))
+	copy(buf, view.Pix)
+	resp.Cleanup()
+
+	img := &image.RGBA{Pix: buf, Stride: view.Stride, Rect: view.Rect}
+	release := func() { putPix(buf) }
+	return img, release, nil
 }
 
 // Close releases the document, the worker instance, and the pool.

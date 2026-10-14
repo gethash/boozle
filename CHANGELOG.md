@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`examples/sample.pdf`**: a small generated deck for local dev runs. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
+
 ### Changed
 
 - **Overview thumbnails are cached across sessions and launches**: slide overview now uses a dedicated thumbnail cache with a 128 MB in-process GPU LRU plus a transparent OS-temp PNG cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run should be immediate, and reopening the same unchanged deck can reuse thumbnails from temp without re-rendering them through PDFium.
@@ -14,6 +18,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **PDFium heap race**: rendered bitmaps were freed inside the PDFium WebAssembly module from the main thread while the prefetcher or thumbnail loader could be rendering on the same instance. `RenderPage` now copies pixels into a pooled Go buffer and frees the PDFium bitmap before releasing the document lock, so WASM memory is only touched under the lock and holds at most one bitmap at a time.
+- **Windows could not open PDFs**: go-pdfium rejects drive-letter paths inside WebAssembly. The PDF's directory is now mounted read-only at `/doc` in the sandbox (instead of the whole filesystem) and opened by a POSIX path.
 - **Presenter overview duplicate work**: in presenter mode, the audience/master process no longer starts a thumbnail loader for overview content it does not draw; the presenter process owns the overview thumbnails it displays.
 
 ## [1.2.0] — 2026-05-05

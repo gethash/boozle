@@ -40,7 +40,7 @@ type thumbLoad struct {
 	listIdx int
 	key     pdf.CacheKey
 	rgba    *image.RGBA
-	cleanup func()
+	cleanup func() // recycles rgba.Pix
 }
 
 type overview struct {

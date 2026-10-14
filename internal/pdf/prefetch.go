@@ -8,12 +8,12 @@ import (
 // UploadJob carries a freshly-rendered page from the prefetch worker to the
 // main goroutine, which uploads the pixels to a GPU image and inserts the
 // resulting *ebiten.Image into the cache. After uploading, the consumer
-// must invoke Cleanup (which releases the PDFium WASM-side bitmap) and
-// Done (which removes the key from the prefetcher's pending set).
+// should invoke Cleanup (which recycles the Go-side pixel buffer) and must
+// invoke Done (which removes the key from the prefetcher's pending set).
 type UploadJob struct {
 	Key     CacheKey
 	RGBA    *image.RGBA
-	Cleanup func() // PDFium WASM cleanup; call once after WritePixels
+	Cleanup func() // returns RGBA.Pix to the pixel pool; call once after WritePixels
 	Done    func() // prefetcher bookkeeping; call after cache.Put
 }
 
@@ -55,7 +55,7 @@ func (p *Prefetcher) Start() {
 }
 
 // Stop signals the worker to exit and blocks until it does. Drains any
-// remaining UploadJobs on the channel and runs their Cleanup so PDFium
+// remaining UploadJobs on the channel and runs their Cleanup so pixel
 // memory isn't leaked.
 func (p *Prefetcher) Stop() {
 	close(p.stop)

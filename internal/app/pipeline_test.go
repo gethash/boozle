@@ -1,6 +1,7 @@
 package app
 
 import (
+	"image"
 	"path/filepath"
 	"testing"
 	"time"
@@ -90,6 +91,43 @@ func testAutoAdvanceShowsEveryPage(t *testing.T, cacheMB int) {
 	}
 	if len(shown) != pages {
 		t.Fatalf("pages shown at exact size = %v, want all %d", shown, pages)
+	}
+}
+
+// TestDrainKeepsEverySlideItUploads lands two renders in one drain with a
+// cache too small for either: the second must not evict the first before
+// the window had a chance to pin it (slow machines finish the urgent render
+// and a prefetch between two frames).
+func TestDrainKeepsEverySlideItUploads(t *testing.T) {
+	p := newTestPipeline(t, 3)
+	p.slides.Resize(1)
+
+	// The worker runs jobs in order, so once the third load starts, the
+	// first two results are waiting to be drained.
+	third, _, _, _ := p.fit(2, 640, 360)
+	started, release := make(chan struct{}), make(chan struct{})
+	p.sched.Stop()
+	p.sched = pdf.NewScheduler(func(j pdf.Job) (*image.RGBA, func(), error) {
+		if j.Key == third {
+			close(started)
+			<-release
+		}
+		return p.load(j)
+	}, p.has)
+	p.sched.Start()
+	t.Cleanup(func() { close(release) }) // runs before p.close stops the worker
+
+	a, _, _, _ := p.fit(0, 640, 360)
+	b, _, _, _ := p.fit(1, 640, 360)
+	p.sched.SetPrefetch(p.missing(a, b, third))
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("renders never finished")
+	}
+	p.drain()
+	if !p.slides.Has(a) || !p.slides.Has(b) {
+		t.Fatalf("after one drain: has(%v)=%v has(%v)=%v, want both", a, p.slides.Has(a), b, p.slides.Has(b))
 	}
 }
 

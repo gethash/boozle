@@ -84,8 +84,19 @@ func (p *pipeline) load(j pdf.Job) (*image.RGBA, func(), error) {
 
 // drain uploads finished renders into their caches and reports whether
 // anything arrived.
+//
+// Slides uploaded by one drain are pinned until it returns, so they can't
+// evict each other: with a budget below a few slides, a prefetch landing
+// right after the urgent render would otherwise evict it before the window
+// gets to pin it — and the window requests each slide only once.
 func (p *pipeline) drain() bool {
 	budget := uploadBytesPerFrame
+	var held []pdf.CacheKey
+	defer func() {
+		for _, k := range held {
+			p.slides.Unpin(k)
+		}
+	}()
 	n := p.sched.Drain(func(r pdf.Result) bool {
 		if r.Err == nil && r.RGBA != nil {
 			// Slides get their own textures so eviction really frees GPU
@@ -100,6 +111,8 @@ func (p *pipeline) drain() bool {
 				}
 			} else {
 				p.slides.Put(r.Key, img)
+				p.slides.Pin(r.Key)
+				held = append(held, r.Key)
 			}
 		}
 		if r.Release != nil {

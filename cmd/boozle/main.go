@@ -54,6 +54,7 @@ func newRootCmd() *cobra.Command {
 		transition       string
 		presenterMonitor int
 		presenterSocket  string // hidden internal flag for the slave subprocess
+		debugStats       bool   // hidden: periodic memory/render diagnostics
 		listMonitors     bool
 		cacheMB          int
 		renderScale      float64
@@ -144,7 +145,15 @@ Sidecars:
 
 			// Presenter slave mode: spawned by the master with a hidden flag.
 			if presenterSocket != "" {
-				return app.RunPresenter(presenterSocket, pdfPath, monitorIdx, cacheMB, renderScale)
+				return app.RunPresenter(app.PresenterOptions{
+					SocketPath:  presenterSocket,
+					PDFPath:     pdfPath,
+					Monitor:     monitorIdx,
+					Windowed:    noFullscreen,
+					CacheMB:     cacheMB,
+					RenderScale: renderScale,
+					DebugStats:  debugStats,
+				})
 			}
 
 			cfg, err := config.Load(config.Flags{
@@ -163,6 +172,7 @@ Sidecars:
 				PresenterMonitor: presenterMonitor,
 				CacheMB:          cacheMB,
 				RenderScale:      renderScale,
+				DebugStats:       debugStats,
 			})
 			if err != nil {
 				return err
@@ -191,6 +201,8 @@ Sidecars:
 	cmd.Flags().Float64Var(&renderScale, "render-scale", 0, "render at fraction of native pixels (0.5..1.0; 0 = native)")
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
+	cmd.Flags().BoolVar(&debugStats, "debug-stats", false, "print memory and render diagnostics to stderr every 2s")
+	_ = cmd.Flags().MarkHidden("debug-stats")
 
 	return cmd
 }

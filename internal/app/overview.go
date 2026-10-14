@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -20,11 +21,14 @@ const (
 	ovExitFrames  = 18
 
 	overviewMaxThumbPixels       = 180
-	overviewThumbQueue           = 64
 	overviewThumbsPerSelection   = 32
-	overviewBackgroundPerFrame   = 4
 	overviewThumbNeighborhoodRow = 2
 	overviewSimpleAnimSlides     = 120
+
+	// overviewPreviewDelay is how long the selection must rest before the
+	// preview pane renders it at full preview resolution, so arrowing
+	// through the grid doesn't queue a render per slide passed.
+	overviewPreviewDelay = 120 * time.Millisecond
 )
 
 type ovPhase int
@@ -36,45 +40,60 @@ const (
 	ovExiting // anim 0 → 1
 )
 
-type thumbLoad struct {
-	listIdx int
-	key     pdf.CacheKey
-	rgba    *image.RGBA
-	cleanup func() // recycles rgba.Pix
-}
-
+// overview is the slide grid opened with Tab: a large preview of the
+// selected slide on the left and a thumbnail grid on the right.
+//
+// The audience window owns the overview state and handles its input. In
+// presenter mode the presenter process mirrors that state over IPC and does
+// all the drawing (and thumbnail loading), so the audience never sees it.
 type overview struct {
-	phase     ovPhase
-	anim      float64
-	cols      int
-	cellW     float64
-	cellH     float64
-	padding   float64
-	gridX     int
-	gridY     int
-	cells     []overviewCell
-	thumbs    []*ebiten.Image // indexed by listIdx; nil = not yet loaded
-	thumbKeys []pdf.CacheKey
-	pinned    []bool
-	thumbCh   chan thumbLoad
-	thumbReq  chan int
-	thumbStop chan struct{}
-	thumbsOn  bool
-	thumbW    int
-	thumbH    int
-	requested []bool
-	nextThumb int
-	gridLayer *ebiten.Image
-	gridDirty bool
+	phase    ovPhase
+	anim     float64
+	pageList []int
+	bufW     int
+	bufH     int
+
+	cols     int
+	cellW    float64
+	cellH    float64
+	padding  float64
+	gridX    int
+	gridY    int
+	cells    []overviewCell
+	gridRect presenterRect // area covered by gridLayer
+
+	// Thumbnails. store is nil when this window doesn't load thumbnails.
+	store  *overviewThumbStore
+	byPage map[int][]int // page → list indices (play lists may repeat pages)
+	thumbW int
+	thumbH int
+	thumbs []*ebiten.Image // indexed by list index; nil = not loaded; non-nil = pinned in store
+
+	gridLayer  *ebiten.Image
+	gridAll    bool  // redraw every tile into gridLayer
+	dirtyTiles []int // tiles whose thumbnail arrived since the last draw
+	version    int   // bumps whenever a thumbnail arrives (redraw detection)
+
 	fromIdx   int // listIdx when overview was opened
 	selIdx    int // keyboard-selected cell (list index)
 	exitToIdx int // destination when closing
 	hoverIdx  int // -1 = none
 	initMx    int // cursor x when overview opened — hover is suppressed until cursor moves
 	initMy    int
+
+	loadSel      int // selection nearJobs was built for
+	nearJobs     []pdf.Job
+	selChangedAt time.Time
+
+	labelSel int
+	label    string
 }
 
 type overviewCell struct {
+	x, y, w, h float64
+}
+
+type rectF struct {
 	x, y, w, h float64
 }
 
@@ -91,14 +110,8 @@ func computeOverviewLayout(bufW, bufH int) overviewLayout {
 	rightW := int(float64(bufW) * 0.42)
 	rightW = max(rightW, 380)
 	rightW = min(rightW, int(float64(bufW)*0.55))
-	leftW := bufW - margin*2 - gap - rightW
-	if leftW < 1 {
-		leftW = 1
-	}
-	fullH := bufH - margin*2
-	if fullH < 1 {
-		fullH = 1
-	}
+	leftW := max(1, bufW-margin*2-gap-rightW)
+	fullH := max(1, bufH-margin*2)
 
 	previewPanel := presenterRect{x: margin, y: margin, w: leftW, h: fullH}
 	gridPanel := presenterRect{x: margin + leftW + gap, y: margin, w: rightW, h: fullH}
@@ -111,20 +124,176 @@ func computeOverviewLayout(bufW, bufH int) overviewLayout {
 }
 
 // computeOvGrid lays out the thumbnail grid inside the framed overview panel.
-func computeOvGrid(n, bufW, bufH int) (gridX, gridY, cols, rows int, cellW, cellH, padding float64) {
+func computeOvGrid(n, bufW, bufH int) (gridX, gridY, cols int, cellW, cellH, padding float64) {
 	content := computeOverviewLayout(bufW, bufH).gridContent
 	padding = 12.0
 	if n == 0 {
-		return content.x, content.y, 1, 1, float64(content.w) - 2*padding, float64(content.h) - 2*padding, padding
+		return content.x, content.y, 1, float64(content.w) - 2*padding, float64(content.h) - 2*padding, padding
 	}
 	aspect := float64(content.w) / float64(content.h)
 	cols = max(1, int(math.Ceil(math.Sqrt(float64(n)*aspect))))
-	rows = (n + cols - 1) / cols
+	rows := (n + cols - 1) / cols
 	cellW = (float64(content.w) - padding*float64(cols+1)) / float64(cols)
 	cellH = (float64(content.h) - padding*float64(rows+1)) / float64(rows)
-	gridX = content.x
-	gridY = content.y
-	return
+	return content.x, content.y, cols, cellW, cellH, padding
+}
+
+// newOverview lays out an overview for pageList at the given buffer size,
+// entering from list index from. Call attach to start loading thumbnails.
+func newOverview(pageList []int, bufW, bufH, from int) overview {
+	n := len(pageList)
+	gridX, gridY, cols, cellW, cellH, padding := computeOvGrid(n, bufW, bufH)
+	from = clampListIndex(from, n)
+	ov := overview{
+		phase:     ovEntering,
+		pageList:  pageList,
+		bufW:      bufW,
+		bufH:      bufH,
+		cols:      cols,
+		cellW:     cellW,
+		cellH:     cellH,
+		padding:   padding,
+		gridX:     gridX,
+		gridY:     gridY,
+		gridRect:  computeOverviewLayout(bufW, bufH).gridContent,
+		thumbW:    max(1, min(overviewMaxThumbPixels, int(math.Round(cellW)))),
+		thumbH:    max(1, min(overviewMaxThumbPixels, int(math.Round(cellH)))),
+		thumbs:    make([]*ebiten.Image, n),
+		gridAll:   true,
+		fromIdx:   from,
+		selIdx:    from,
+		exitToIdx: from,
+		hoverIdx:  -1,
+		loadSel:   -1,
+		labelSel:  -1,
+	}
+	ov.buildCells(n)
+	ov.initMx, ov.initMy = ebiten.CursorPosition()
+	return ov
+}
+
+// attach makes this overview load thumbnails through p: cached ones are
+// shown immediately, the rest are queued as background renders. ov must
+// not move in memory while attached (p keeps a callback into it).
+func (ov *overview) attach(p *pipeline) {
+	ov.store = p.thumbs
+	ov.byPage = make(map[int][]int, len(ov.pageList))
+	for i, page := range ov.pageList {
+		ov.byPage[page] = append(ov.byPage[page], i)
+	}
+	p.onThumb = ov.receiveThumb
+	var background []pdf.Job
+	for i, page := range ov.pageList {
+		if ov.byPage[page][0] != i {
+			continue // repeated page: one job covers all its tiles
+		}
+		key := ov.thumbKey(page)
+		if img, ok := p.thumbs.Get(key); ok {
+			ov.receiveThumb(key, img)
+			continue
+		}
+		background = append(background, pdf.Job{Kind: pdf.KindThumb, Key: key})
+	}
+	p.sched.AddBackground(background...)
+}
+
+// release unpins thumbnails, frees the grid layer and cancels queued
+// thumbnail work. Safe on a zero overview and with a nil pipeline.
+func (ov *overview) release(p *pipeline) {
+	if ov.store != nil {
+		for i, img := range ov.thumbs {
+			if img != nil {
+				ov.store.Unpin(ov.thumbKey(ov.pageList[i]))
+			}
+		}
+	}
+	if ov.gridLayer != nil {
+		ov.gridLayer.Deallocate()
+		ov.gridLayer = nil
+	}
+	if p != nil && ov.store != nil {
+		p.onThumb = nil
+		p.sched.ClearBackground()
+	}
+	*ov = overview{}
+}
+
+func (ov *overview) thumbKey(page int) pdf.CacheKey {
+	return pdf.CacheKey{Page: page, W: ov.thumbW, H: ov.thumbH}
+}
+
+// receiveThumb assigns a freshly available thumbnail to every tile showing
+// its page and pins it for as long as the overview is open.
+func (ov *overview) receiveThumb(key pdf.CacheKey, img *ebiten.Image) {
+	if ov.phase == ovOff || ov.store == nil || key.W != ov.thumbW || key.H != ov.thumbH {
+		return
+	}
+	for _, i := range ov.byPage[key.Page] {
+		if ov.thumbs[i] != nil {
+			continue
+		}
+		ov.store.Pin(key)
+		ov.thumbs[i] = img
+		ov.dirtyTiles = append(ov.dirtyTiles, i)
+		ov.version++
+	}
+}
+
+// visibleJobs returns render work that should run before background
+// thumbnails: the selected slide at preview size, once the selection has
+// rested for overviewPreviewDelay, and the thumbnails around the selection.
+func (ov *overview) visibleJobs(p *pipeline, now time.Time) []pdf.Job {
+	if ov.store == nil || (ov.phase != ovEntering && ov.phase != ovActive) {
+		return nil
+	}
+	if ov.loadSel != ov.selIdx {
+		ov.loadSel = ov.selIdx
+		ov.selChangedAt = now
+		ov.nearJobs = ov.nearJobs[:0]
+		for _, idx := range overviewLoadOrder(len(ov.pageList), ov.selIdx, ov.fromIdx, ov.cols) {
+			ov.nearJobs = append(ov.nearJobs, pdf.Job{Kind: pdf.KindThumb, Key: ov.thumbKey(ov.pageList[idx])})
+		}
+	}
+	var jobs []pdf.Job
+	if ov.selIdx != ov.fromIdx && now.Sub(ov.selChangedAt) >= overviewPreviewDelay {
+		if key, ok := ov.previewKey(p, ov.selIdx); ok {
+			jobs = append(jobs, p.missing(key)...)
+		}
+	}
+	for _, j := range ov.nearJobs {
+		if !p.thumbs.Has(j.Key) {
+			jobs = append(jobs, j)
+		}
+	}
+	return jobs
+}
+
+func (ov *overview) previewKey(p *pipeline, idx int) (pdf.CacheKey, bool) {
+	if idx < 0 || idx >= len(ov.pageList) {
+		return pdf.CacheKey{}, false
+	}
+	c := computeOverviewLayout(ov.bufW, ov.bufH).previewContent
+	key, _, _, ok := p.fit(ov.pageList[idx], c.w, c.h)
+	return key, ok
+}
+
+// step advances the enter/exit animation by one frame. It returns true when
+// the exit animation has finished.
+func (ov *overview) step() (exited bool) {
+	switch ov.phase {
+	case ovEntering:
+		ov.anim += 1.0 / ovEnterFrames
+		if ov.anim >= 1 {
+			ov.anim = 1
+			ov.phase = ovActive
+		}
+	case ovExiting:
+		ov.anim += 1.0 / ovExitFrames
+		if ov.anim >= 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (ov *overview) cellRect(i int) (x, y, w, h float64) {
@@ -132,11 +301,7 @@ func (ov *overview) cellRect(i int) (x, y, w, h float64) {
 		c := ov.cells[i]
 		return c.x, c.y, c.w, c.h
 	}
-	col := i % ov.cols
-	row := i / ov.cols
-	x = float64(ov.gridX) + ov.padding + float64(col)*(ov.cellW+ov.padding)
-	y = float64(ov.gridY) + ov.padding + float64(row)*(ov.cellH+ov.padding)
-	return x, y, ov.cellW, ov.cellH
+	return 0, 0, 0, 0
 }
 
 func (ov *overview) buildCells(n int) {
@@ -146,8 +311,7 @@ func (ov *overview) buildCells(n int) {
 		row := i / ov.cols
 		x := float64(ov.gridX) + ov.padding + float64(col)*(ov.cellW+ov.padding)
 		y := float64(ov.gridY) + ov.padding + float64(row)*(ov.cellH+ov.padding)
-		w, h := ov.cellW, ov.cellH
-		ov.cells[i] = overviewCell{x: x, y: y, w: w, h: h}
+		ov.cells[i] = overviewCell{x: x, y: y, w: ov.cellW, h: ov.cellH}
 	}
 }
 
@@ -179,6 +343,20 @@ func (ov *overview) hoverIndex(mx, my, n int) int {
 	return idx
 }
 
+// updateHover tracks the tile under the mouse (suppressed until the cursor
+// moves after opening) and returns the clicked tile, or -1.
+func (ov *overview) updateHover() (clicked int) {
+	mx, my := ebiten.CursorPosition()
+	ov.hoverIdx = -1
+	if mx != ov.initMx || my != ov.initMy {
+		ov.hoverIdx = ov.hoverIndex(mx, my, len(ov.pageList))
+	}
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && ov.hoverIdx >= 0 {
+		return ov.hoverIdx
+	}
+	return -1
+}
+
 func (ov *overview) useStaticGrid(n int) bool {
 	return n >= overviewSimpleAnimSlides || ov.phase == ovActive || ov.phase == ovExiting
 }
@@ -197,13 +375,7 @@ func easeOut(t float64) float64 {
 }
 
 func clamp01(t float64) float64 {
-	if t < 0 {
-		return 0
-	}
-	if t > 1 {
-		return 1
-	}
-	return t
+	return min(1, max(0, t))
 }
 
 func lerpF(a, b, t float64) float64 {
@@ -217,238 +389,16 @@ func abs(x int) int {
 	return x
 }
 
-// openOverview initialises overview mode and kicks off thumbnail loading.
-func (g *Game) openOverview() {
-	n := len(g.pageList)
-	gridX, gridY, cols, _, cellW, cellH, padding := computeOvGrid(n, g.bufW, g.bufH)
-	thumbsOn := g.stateCh == nil
-	thumbW := max(1, min(overviewMaxThumbPixels, int(math.Round(cellW))))
-	thumbH := max(1, min(overviewMaxThumbPixels, int(math.Round(cellH))))
-	g.ov = overview{
-		phase:     ovEntering,
-		cols:      cols,
-		cellW:     cellW,
-		cellH:     cellH,
-		padding:   padding,
-		gridX:     gridX,
-		gridY:     gridY,
-		thumbs:    make([]*ebiten.Image, n),
-		thumbKeys: make([]pdf.CacheKey, n),
-		pinned:    make([]bool, n),
-		thumbsOn:  thumbsOn,
-		thumbW:    thumbW,
-		thumbH:    thumbH,
-		requested: make([]bool, n),
-		nextThumb: 0,
-		gridDirty: true,
-		fromIdx:   g.listIdx,
-		selIdx:    g.listIdx,
-		exitToIdx: g.listIdx,
-		hoverIdx:  -1,
+func clampListIndex(idx, n int) int {
+	if n <= 0 {
+		return 0
 	}
-	g.ov.buildCells(n)
-	g.ov.initMx, g.ov.initMy = ebiten.CursorPosition()
-	if thumbsOn {
-		g.ov.thumbCh = make(chan thumbLoad, overviewThumbQueue)
-		g.ov.thumbReq = make(chan int, overviewThumbQueue)
-		g.ov.thumbStop = make(chan struct{})
-		g.startThumbLoader()
-		g.requestOverviewThumbnails(g.listIdx)
-	}
+	return max(0, min(n-1, idx))
 }
 
-// startThumbLoader renders requested slides at capped thumbnail size on a
-// background goroutine. Captures all values by value so zeroing g.ov later is safe.
-func (g *Game) startThumbLoader() {
-	startOverviewThumbLoader(g.doc, g.thumbStore, g.pageList, g.ov.thumbW, g.ov.thumbH, g.ov.thumbReq, g.ov.thumbCh, g.ov.thumbStop)
-}
-
-func (g *Game) requestOverviewThumbnails(center int) {
-	if !g.ov.thumbsOn {
-		return
-	}
-	ov := &g.ov
-	for _, idx := range overviewLoadOrder(len(g.pageList), center, ov.fromIdx, ov.cols) {
-		ok, stopped := g.requestOverviewThumbnail(idx)
-		if stopped {
-			return
-		}
-		if !ok {
-			return
-		}
-	}
-}
-
-func (g *Game) requestMoreOverviewThumbnails(limit int) {
-	ov := &g.ov
-	if !ov.thumbsOn || limit <= 0 || len(g.pageList) == 0 {
-		return
-	}
-	queued := 0
-	scanned := 0
-	for queued < limit && scanned < len(g.pageList) {
-		idx := ov.nextThumb
-		ov.nextThumb = (ov.nextThumb + 1) % len(g.pageList)
-		scanned++
-		ok, stopped := g.requestOverviewThumbnail(idx)
-		if stopped || !ok {
-			return
-		}
-		queued++
-	}
-}
-
-func (g *Game) requestOverviewThumbnail(idx int) (queued bool, stopped bool) {
-	return requestOverviewThumbnail(&g.ov, g.thumbStore, g.pageList, idx)
-}
-
-func requestOverviewThumbnail(ov *overview, store *overviewThumbStore, pageList []int, idx int) (queued bool, stopped bool) {
-	if ov == nil || !ov.thumbsOn || idx < 0 || idx >= len(ov.requested) || ov.requested[idx] {
-		return true, false
-	}
-	if idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
-		return true, false
-	}
-	key := ov.thumbKey(pageList, idx)
-	if img, ok := store.Get(key); ok {
-		ov.assignThumb(store, idx, key, img)
-		ov.requested[idx] = true
-		return true, false
-	}
-	select {
-	case <-ov.thumbStop:
-		return false, true
-	case ov.thumbReq <- idx:
-		ov.requested[idx] = true
-		return true, false
-	default:
-		return false, false
-	}
-}
-
-func (ov *overview) thumbKey(pageList []int, idx int) pdf.CacheKey {
-	if idx < 0 || idx >= len(pageList) {
-		return pdf.CacheKey{}
-	}
-	return pdf.CacheKey{Page: pageList[idx], W: ov.thumbW, H: ov.thumbH}
-}
-
-func (ov *overview) assignThumb(store *overviewThumbStore, idx int, key pdf.CacheKey, img *ebiten.Image) {
-	if idx < 0 || idx >= len(ov.thumbs) || img == nil {
-		return
-	}
-	if ov.pinned[idx] && ov.thumbKeys[idx] == key && ov.thumbs[idx] == img {
-		return
-	}
-	if ov.pinned[idx] {
-		store.Unpin(ov.thumbKeys[idx])
-		ov.pinned[idx] = false
-	}
-	store.Pin(key)
-	ov.thumbs[idx] = img
-	ov.thumbKeys[idx] = key
-	ov.pinned[idx] = true
-	ov.gridDirty = true
-}
-
-func startOverviewThumbLoader(doc *pdf.Doc, store *overviewThumbStore, pageList []int, w, h int, thumbReq <-chan int, thumbCh chan<- thumbLoad, thumbStop <-chan struct{}) {
-	if doc == nil || thumbReq == nil || thumbCh == nil || thumbStop == nil {
-		return
-	}
-	pages := append([]int(nil), pageList...)
-	go func() {
-		for {
-			select {
-			case <-thumbStop:
-				return
-			case i := <-thumbReq:
-				if i < 0 || i >= len(pages) {
-					continue
-				}
-				key := pdf.CacheKey{Page: pages[i], W: w, H: h}
-				if rgba, ok := store.LoadDisk(key); ok {
-					select {
-					case thumbCh <- thumbLoad{listIdx: i, key: key, rgba: rgba}:
-					case <-thumbStop:
-						return
-					}
-					continue
-				}
-				rgba, cleanup, err := doc.RenderPage(key.Page, key.W, key.H)
-				if err != nil {
-					continue
-				}
-				store.SaveDisk(key, rgba)
-				select {
-				case thumbCh <- thumbLoad{listIdx: i, key: key, rgba: rgba, cleanup: cleanup}:
-				case <-thumbStop:
-					if cleanup != nil {
-						cleanup()
-					}
-					return
-				}
-			}
-		}
-	}()
-}
-
-func drainOverviewThumbnails(ov *overview, store *overviewThumbStore, limit int) {
-	if ov == nil || ov.thumbCh == nil {
-		return
-	}
-	for i := 0; i < limit; i++ {
-		select {
-		case tl := <-ov.thumbCh:
-			if tl.listIdx >= 0 && tl.listIdx < len(ov.thumbs) && tl.rgba != nil {
-				if img, ok := store.Get(tl.key); ok {
-					ov.assignThumb(store, tl.listIdx, tl.key, img)
-				} else {
-					eimg := uploadRGBA(tl.rgba)
-					store.Put(tl.key, eimg)
-					ov.assignThumb(store, tl.listIdx, tl.key, eimg)
-				}
-			}
-			if tl.cleanup != nil {
-				tl.cleanup()
-			}
-		default:
-			return
-		}
-	}
-}
-
-func releaseOverviewThumbnails(ov *overview, store *overviewThumbStore) {
-	if ov == nil {
-		return
-	}
-	for i, ok := range ov.pinned {
-		if ok {
-			store.Unpin(ov.thumbKeys[i])
-			ov.pinned[i] = false
-		}
-	}
-	if ov.gridLayer != nil {
-		ov.gridLayer.Deallocate()
-		ov.gridLayer = nil
-	}
-}
-
-func drainAndDiscardOverviewLoads(ov *overview) {
-	if ov == nil || ov.thumbCh == nil {
-		return
-	}
-	for {
-		select {
-		case tl := <-ov.thumbCh:
-			if tl.cleanup != nil {
-				tl.cleanup()
-			}
-		default:
-			return
-		}
-	}
-}
-
+// overviewLoadOrder returns up to overviewThumbsPerSelection list indices to
+// load first: the selection, the originating slide, then the grid
+// neighbourhood around the selection.
 func overviewLoadOrder(n, center, include, cols int) []int {
 	if n <= 0 {
 		return nil
@@ -518,37 +468,51 @@ func overviewLoadOrder(n, center, include, cols int) []int {
 	return out
 }
 
-// closeOverview signals the thumbnail loader to stop and begins the exit animation.
-func (g *Game) closeOverview(targetIdx int) {
-	if g.ov.thumbStop != nil {
-		close(g.ov.thumbStop)
+// ── audience-side control ────────────────────────────────────────────────
+
+// openOverview lays out the overview. Thumbnails are only loaded when this
+// window draws the overview (i.e. no presenter process owns it).
+func (g *Game) openOverview() {
+	g.ov = newOverview(g.pageList, g.bufW, g.bufH, g.listIdx)
+	if g.shouldDrawOverviewOnAudience() && g.pipe != nil {
+		g.ov.attach(g.pipe)
 	}
+}
+
+// closeOverview starts the exit animation towards targetIdx and requests
+// the full-size render of the target right away, so it is usually ready
+// when the zoom-out finishes.
+func (g *Game) closeOverview(targetIdx int) {
 	g.ov.exitToIdx = targetIdx
 	g.ov.phase = ovExiting
 	g.ov.anim = 0
+	if g.pipe != nil && g.ov.store != nil {
+		g.pipe.onThumb = nil
+		g.pipe.sched.ClearBackground()
+		g.pipe.sched.SetVisible(nil)
+	}
+	if g.pipe != nil && g.bufW > 0 && g.bufH > 0 {
+		if key, _, _, ok := g.pipe.fit(g.pageList[targetIdx], g.bufW, g.bufH); ok {
+			g.pipe.requestNow(key)
+		}
+	}
 }
 
 // updateOverview drives animation, handles input, and finalises the transition.
 // It is called from Update() whenever ov.phase != ovOff.
 func (g *Game) updateOverview(presenterCmds []ipc.PresenterCommand) error {
 	ov := &g.ov
+	n := len(g.pageList)
 
-	drainOverviewThumbnails(ov, g.thumbStore, 10)
-	if ov.phase == ovEntering || ov.phase == ovActive {
-		g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
+	if ov.bufW != g.bufW || ov.bufH != g.bufH {
+		g.relayoutOverview()
 	}
 
 	switch ov.phase {
 	case ovEntering:
-		ov.anim += 1.0 / ovEnterFrames
-		if ov.anim >= 1 {
-			ov.anim = 1
-			ov.phase = ovActive
-		}
+		ov.step()
 
 	case ovActive:
-		n := len(g.pageList)
-		prevSel := ov.selIdx
 		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) ||
 			inpututil.IsKeyJustPressed(ebiten.KeyTab) ||
 			presenterCmdPressed(presenterCmds, presenterCmdEscape) ||
@@ -593,57 +557,52 @@ func (g *Game) updateOverview(presenterCmds []ipc.PresenterCommand) error {
 			}
 		}
 		if g.shouldDrawOverviewOnAudience() {
-			// Mouse hover hit-test — suppressed until the cursor actually moves after
-			// the overview opens, so tiles aren't highlighted by the resting cursor.
-			mx, my := ebiten.CursorPosition()
-			ov.hoverIdx = -1
-			if mx != ov.initMx || my != ov.initMy {
-				ov.hoverIdx = ov.hoverIndex(mx, my, n)
-			}
-			if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) && ov.hoverIdx >= 0 {
-				g.closeOverview(ov.hoverIdx)
+			if clicked := ov.updateHover(); clicked >= 0 {
+				g.closeOverview(clicked)
 				return nil
 			}
 		}
-		if ov.selIdx != prevSel {
-			g.requestOverviewThumbnails(ov.selIdx)
-		}
 
 	case ovExiting:
-		ov.anim += 1.0 / ovExitFrames
-		if ov.anim >= 1 {
-			exitTo := ov.exitToIdx
-			from := ov.fromIdx
-			releaseOverviewThumbnails(ov, g.thumbStore)
-			drainAndDiscardOverviewLoads(ov)
-			// Reset overview state, then wire up navigation.
-			g.ov = overview{}
+		if ov.step() {
+			exitTo, from := ov.exitToIdx, ov.fromIdx
+			ov.release(g.pipe)
 			g.listIdx = exitTo
 			g.prevListIdx = from
-			g.auto.Reset(g.pageList[exitTo] + 1)
-			if g.bufW > 0 && g.bufH > 0 {
-				if err := g.maybeRefreshDisplay(); err != nil {
-					return err
-				}
-				g.prefetchNeighbors()
-			}
+			g.auto.Reset(g.currentPage() + 1)
 		}
+	}
+
+	if g.pipe != nil && ov.store != nil {
+		g.pipe.sched.SetVisible(ov.visibleJobs(g.pipe, time.Now()))
 	}
 	return nil
 }
 
-// drawOverview renders the split-view overview: large preview on the left,
-// thumbnail grid on the right.
-func (g *Game) drawOverview(screen *ebiten.Image) {
-	ov := &g.ov
-	n := len(g.pageList)
+// relayoutOverview rebuilds the grid after a window resize, keeping the
+// animation phase and selection.
+func (g *Game) relayoutOverview() {
+	old := g.ov
+	attached := old.store != nil
+	old.release(g.pipe)
+	g.ov = newOverview(g.pageList, g.bufW, g.bufH, old.fromIdx)
+	g.ov.phase, g.ov.anim = old.phase, old.anim
+	g.ov.selIdx, g.ov.exitToIdx = old.selIdx, old.exitToIdx
+	if attached {
+		g.ov.attach(g.pipe)
+	}
+}
+
+// ── drawing (shared by audience and presenter windows) ──────────────────
+
+// draw renders the overview over screen. p may be nil (no thumbnails or
+// preview renders); cur is the slide shown before the overview opened and
+// curRect where it sat on screen, which the preview animates from.
+func (ov *overview) draw(screen *ebiten.Image, p *pipeline, cur *ebiten.Image, curRect rectF) {
+	n := len(ov.pageList)
 	if n == 0 {
 		return
 	}
-	W := float64(g.bufW)
-	H := float64(g.bufH)
-
-	// Dark scrim covering the full buffer.
 	var scrimAlpha float64
 	switch ov.phase {
 	case ovEntering:
@@ -653,143 +612,140 @@ func (g *Game) drawOverview(screen *ebiten.Image) {
 	case ovExiting:
 		scrimAlpha = lerpF(230, 0, easeInOut(ov.anim))
 	}
-
-	vector.FillRect(screen, 0, 0, float32(W), float32(H),
+	vector.FillRect(screen, 0, 0, float32(ov.bufW), float32(ov.bufH),
 		color.RGBA{8, 10, 18, uint8(scrimAlpha)}, false)
 
-	lo := computeOverviewLayout(g.bufW, g.bufH)
+	lo := computeOverviewLayout(ov.bufW, ov.bufH)
 	drawPresenterPanel(screen, lo.previewPanel)
 	drawPresenterPanel(screen, lo.gridPanel)
-	drawPresenterText(screen, "SELECTED", lo.previewPanel.x+18, lo.previewPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
-	drawPresenterText(screen, "OVERVIEW", lo.gridPanel.x+18, lo.gridPanel.y+14, 2, color.RGBA{148, 163, 184, 255})
+	drawPresenterText(screen, "SELECTED", lo.previewPanel.x+18, lo.previewPanel.y+14, 2, colorLabel)
+	drawPresenterText(screen, "OVERVIEW", lo.gridPanel.x+18, lo.gridPanel.y+14, 2, colorLabel)
 
-	g.drawOverviewPreview(screen)
-
+	ov.drawPreview(screen, p, cur, curRect, lo.previewContent)
 	if ov.useStaticGrid(n) {
-		g.drawOverviewGridLayer(screen)
+		ov.drawGridLayer(screen)
 		if ov.phase == ovActive {
-			g.drawOverviewActiveBorders(screen)
+			for _, i := range []int{ov.fromIdx, ov.selIdx, ov.hoverIdx} {
+				ov.drawTileBorder(screen, i, ov.tileImageRect(i))
+			}
 		}
 	} else {
 		for i := range n {
-			g.drawOverviewTile(screen, i)
+			ov.drawTile(screen, i)
 		}
 	}
 
 	if ov.phase == ovActive && ov.selIdx >= 0 && ov.selIdx < n {
-		page1 := g.pageList[ov.selIdx] + 1
-		label := fmt.Sprintf("p. %d / %d", page1, n)
-		drawPresenterText(screen, label, lo.previewPanel.x+18, lo.previewPanel.y+lo.previewPanel.h-32, 2, color.RGBA{248, 250, 252, 220})
+		if ov.labelSel != ov.selIdx {
+			ov.labelSel = ov.selIdx
+			ov.label = fmt.Sprintf("p. %d / %d", ov.pageList[ov.selIdx]+1, n)
+		}
+		drawPresenterText(screen, ov.label, lo.previewPanel.x+18, lo.previewPanel.y+lo.previewPanel.h-32, 2, color.RGBA{248, 250, 252, 220})
 	}
 }
 
-// drawOverviewPreview draws the large current/selected slide on the left half,
-// animating in from the slide's normal display position on enter, and zooming
-// to fill the screen on exit.
-func (g *Game) drawOverviewPreview(screen *ebiten.Image) {
-	ov := &g.ov
-	content := computeOverviewLayout(g.bufW, g.bufH).previewContent
-	leftW := float64(content.w)
-	leftH := float64(content.h)
-
-	// Select the image to display.
-	var img *ebiten.Image
+// previewImage picks the image for the left pane: the live slide for the
+// originating tile, else the best cached render of the selection (the
+// debounced preview-size render, or any other size), else its thumbnail.
+func (ov *overview) previewImage(p *pipeline, cur *ebiten.Image) *ebiten.Image {
+	idx := ov.selIdx
 	switch ov.phase {
 	case ovEntering:
-		img = g.display
-		if img == nil {
-			img = ov.thumbs[ov.fromIdx]
-		}
-	case ovActive:
-		if ov.selIdx == ov.fromIdx {
-			img = g.display
-		} else {
-			img = ov.thumbs[ov.selIdx]
-		}
-		if img == nil {
-			img = g.display
-		}
+		idx = ov.fromIdx
 	case ovExiting:
-		if ov.exitToIdx == ov.fromIdx {
-			img = g.display
-		} else {
-			img = ov.thumbs[ov.exitToIdx]
-		}
-		if img == nil {
-			img = g.display
+		idx = ov.exitToIdx
+	}
+	if idx == ov.fromIdx && cur != nil {
+		return cur
+	}
+	if p != nil {
+		if key, ok := ov.previewKey(p, idx); ok {
+			if img, _ := p.resolve(key); img != nil {
+				return img
+			}
 		}
 	}
+	if idx >= 0 && idx < len(ov.thumbs) && ov.thumbs[idx] != nil {
+		return ov.thumbs[idx]
+	}
+	return cur
+}
 
+// drawPreview draws the large slide on the left, animating in from the
+// slide's normal position on enter and zooming to fill the screen on exit.
+func (ov *overview) drawPreview(screen *ebiten.Image, p *pipeline, cur *ebiten.Image, curRect rectF, content presenterRect) {
+	img := ov.previewImage(p, cur)
 	if img == nil {
 		return
 	}
-	iW := float64(img.Bounds().Dx())
-	iH := float64(img.Bounds().Dy())
-	if iW <= 0 || iH <= 0 {
+	iw := float64(img.Bounds().Dx())
+	ih := float64(img.Bounds().Dy())
+	if iw <= 0 || ih <= 0 {
 		return
 	}
-
-	// Aspect-fit target inside the left half.
-	s := math.Min(leftW/iW, leftH/iH)
-	fitW := iW * s
-	fitH := iH * s
-	fitX := float64(content.x) + (leftW-fitW)/2
-	fitY := float64(content.y) + (leftH-fitH)/2
-
-	var tx, ty, tw, th float64
-
+	fit := imageFitRect(img, content)
+	t := fit
 	switch ov.phase {
 	case ovEntering:
-		localT := easeInOut(clamp01(ov.anim / 0.7))
-		tx = lerpF(float64(g.displayBounds.dstX), fitX, localT)
-		ty = lerpF(float64(g.displayBounds.dstY), fitY, localT)
-		tw = lerpF(float64(g.displayBounds.dstW), fitW, localT)
-		th = lerpF(float64(g.displayBounds.dstH), fitH, localT)
-
-	case ovActive:
-		tx, ty, tw, th = fitX, fitY, fitW, fitH
-
+		start := curRect
+		if start.w <= 0 || start.h <= 0 {
+			start = fit
+		}
+		t = lerpRect(start, fit, easeInOut(clamp01(ov.anim/0.7)))
 	case ovExiting:
-		// Zoom to the aspect-fit position within the full screen.
-		sf := math.Min(float64(g.bufW)/iW, float64(g.bufH)/iH)
-		fullW := math.Round(iW * sf)
-		fullH := math.Round(iH * sf)
-		fullX := (float64(g.bufW) - fullW) / 2
-		fullY := (float64(g.bufH) - fullH) / 2
-		localT := easeInOut(ov.anim)
-		tx = lerpF(fitX, fullX, localT)
-		ty = lerpF(fitY, fullY, localT)
-		tw = lerpF(fitW, fullW, localT)
-		th = lerpF(fitH, fullH, localT)
+		full := imageFitRect(img, presenterRect{w: ov.bufW, h: ov.bufH})
+		t = lerpRect(fit, full, easeInOut(ov.anim))
 	}
-
-	if tw < 1 || th < 1 {
+	if t.w < 1 || t.h < 1 {
 		return
 	}
-
 	op := &ebiten.DrawImageOptions{}
-	op.GeoM.Scale(tw/iW, th/iH)
-	op.GeoM.Translate(tx, ty)
+	op.GeoM.Scale(t.w/iw, t.h/ih)
+	op.GeoM.Translate(t.x, t.y)
+	op.Filter = ebiten.FilterLinear
 	screen.DrawImage(img, op)
 }
 
-func (g *Game) drawOverviewGridLayer(screen *ebiten.Image) {
-	ov := &g.ov
-	if ov.gridLayer == nil || ov.gridLayer.Bounds().Dx() != g.bufW || ov.gridLayer.Bounds().Dy() != g.bufH {
-		if ov.gridLayer != nil {
-			ov.gridLayer.Deallocate()
-		}
-		ov.gridLayer = ebiten.NewImage(g.bufW, g.bufH)
-		ov.gridDirty = true
+func lerpRect(a, b rectF, t float64) rectF {
+	return rectF{x: lerpF(a.x, b.x, t), y: lerpF(a.y, b.y, t), w: lerpF(a.w, b.w, t), h: lerpF(a.h, b.h, t)}
+}
+
+func imageFitRect(img *ebiten.Image, r presenterRect) rectF {
+	w, h, offX, offY := aspectFit(float64(img.Bounds().Dx()), float64(img.Bounds().Dy()), r.w, r.h)
+	return rectF{x: float64(r.x + offX), y: float64(r.y + offY), w: float64(w), h: float64(h)}
+}
+
+// drawGridLayer composites the static grid. Tiles are cached in gridLayer
+// (covering only the grid panel) and redrawn individually as thumbnails
+// arrive, instead of repainting every tile.
+func (ov *overview) drawGridLayer(screen *ebiten.Image) {
+	r := ov.gridRect
+	if r.w <= 0 || r.h <= 0 {
+		return
 	}
-	if ov.gridDirty {
+	if ov.gridLayer == nil {
+		ov.gridLayer = ebiten.NewImage(r.w, r.h)
+		ov.gridAll = true
+	}
+	ox, oy := float64(r.x), float64(r.y)
+	if ov.gridAll {
 		ov.gridLayer.Clear()
-		for i := range len(g.pageList) {
+		for i := range ov.pageList {
 			x, y, w, h := ov.cellRect(i)
-			drawOverviewTileBase(ov.gridLayer, ov, i, x, y, w, h, 1)
+			drawOverviewTileBase(ov.gridLayer, ov.thumbs[i], x-ox, y-oy, w, h, 1)
 		}
-		ov.gridDirty = false
+		ov.gridAll = false
+	} else {
+		for _, i := range ov.dirtyTiles {
+			x, y, w, h := ov.cellRect(i)
+			x, y = x-ox, y-oy
+			cell := image.Rect(int(math.Floor(x)), int(math.Floor(y)), int(math.Ceil(x+w)), int(math.Ceil(y+h)))
+			ov.gridLayer.SubImage(cell).(*ebiten.Image).Clear()
+			drawOverviewTileBase(ov.gridLayer, ov.thumbs[i], x, y, w, h, 1)
+		}
 	}
+	ov.dirtyTiles = ov.dirtyTiles[:0]
+
 	alpha := 1.0
 	switch ov.phase {
 	case ovEntering:
@@ -801,115 +757,23 @@ func (g *Game) drawOverviewGridLayer(screen *ebiten.Image) {
 		return
 	}
 	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Translate(ox, oy)
 	op.ColorScale.ScaleAlpha(float32(alpha))
 	screen.DrawImage(ov.gridLayer, op)
 }
 
-func (g *Game) drawOverviewActiveBorders(screen *ebiten.Image) {
-	ov := &g.ov
-	n := len(g.pageList)
-	for _, i := range []int{ov.fromIdx, ov.selIdx, ov.hoverIdx} {
-		if i < 0 || i >= n {
-			continue
-		}
-		imgX, imgY, imgW, imgH := ov.tileImageRect(i)
-		if imgW < 1 || imgH < 1 {
-			continue
-		}
-		switch {
-		case i == ov.selIdx && i != ov.fromIdx:
-			gradT := float32(0)
-			if n > 1 {
-				gradT = float32(i) / float32(n-1)
-			}
-			drawOverviewBorder(screen, imgX, imgY, imgW, imgH, 2, rainbowAt(gradT, 255))
-		case i == ov.fromIdx:
-			drawOverviewBorder(screen, imgX, imgY, imgW, imgH, 2, color.RGBA{180, 180, 180, 160})
-		case i == ov.hoverIdx:
-			drawOverviewBorder(screen, imgX, imgY, imgW, imgH, 1, color.RGBA{255, 255, 255, 120})
-		}
-	}
-}
-
-func (ov *overview) tileImageRect(i int) (imgX, imgY, imgW, imgH float64) {
-	x, y, w, h := ov.cellRect(i)
-	img := ov.thumbs[i]
-	if img == nil {
-		return x, y, w, h
-	}
-	iw := float64(img.Bounds().Dx())
-	ih := float64(img.Bounds().Dy())
-	if iw <= 0 || ih <= 0 {
-		return 0, 0, 0, 0
-	}
-	sc := math.Min(w/iw, h/ih)
-	imgW = iw * sc
-	imgH = ih * sc
-	imgX = x + (w-imgW)/2
-	imgY = y + (h-imgH)/2
-	return
-}
-
-func drawOverviewTileBase(screen *ebiten.Image, ov *overview, i int, tx, ty, tw, th, alpha float64) (imgX, imgY, imgW, imgH float64) {
-	img := ov.thumbs[i]
-	if img != nil {
-		iW := float64(img.Bounds().Dx())
-		iH := float64(img.Bounds().Dy())
-		if iW > 0 && iH > 0 {
-			sc := math.Min(tw/iW, th/iH)
-			imgW = iW * sc
-			imgH = iH * sc
-			imgX = tx + (tw-imgW)/2
-			imgY = ty + (th-imgH)/2
-			op := &ebiten.DrawImageOptions{}
-			op.GeoM.Scale(sc, sc)
-			op.GeoM.Translate(imgX, imgY)
-			op.ColorScale.ScaleAlpha(float32(alpha))
-			op.Filter = ebiten.FilterLinear
-			screen.DrawImage(img, op)
-		}
-	} else {
-		imgX, imgY, imgW, imgH = tx, ty, tw, th
-		if a := uint8(alpha * 200); a > 0 {
-			vector.FillRect(screen,
-				float32(tx), float32(ty), float32(tw), float32(th),
-				color.RGBA{31, 41, 55, a}, false)
-		}
-	}
-	return
-}
-
-func drawOverviewBorder(screen *ebiten.Image, x, y, w, h, bw float64, c color.Color) {
-	vector.FillRect(screen, float32(x), float32(y), float32(w), float32(bw), c, false)
-	vector.FillRect(screen, float32(x), float32(y+h-bw), float32(w), float32(bw), c, false)
-	vector.FillRect(screen, float32(x), float32(y), float32(bw), float32(h), c, false)
-	vector.FillRect(screen, float32(x+w-bw), float32(y), float32(bw), float32(h), c, false)
-}
-
-// drawOverviewTile draws one thumbnail in the right-half grid.
-func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
-	ov := &g.ov
-	n := len(g.pageList)
-
+// drawTile draws one tile directly to screen with the per-tile cascade used
+// while small decks enter.
+func (ov *overview) drawTile(screen *ebiten.Image, i int) {
+	n := len(ov.pageList)
 	cx, cy, cw, ch := ov.cellRect(i)
-	var tx, ty, tw, th float64
-	var alpha float64 = 1.0
+	tx, ty, tw, th := cx, cy, cw, ch
+	alpha := 1.0
 
 	switch ov.phase {
 	case ovEntering:
-		// All tiles cascade in from their cell centres.
-		dist := i - ov.fromIdx
-		if dist < 0 {
-			dist = -dist
-		}
-		maxDist := ov.fromIdx
-		if tail := n - 1 - ov.fromIdx; tail > maxDist {
-			maxDist = tail
-		}
-		if maxDist == 0 {
-			maxDist = 1
-		}
-		nd := float64(dist) / float64(maxDist)
+		maxDist := max(1, ov.fromIdx, n-1-ov.fromIdx)
+		nd := float64(abs(i-ov.fromIdx)) / float64(maxDist)
 		startT := 0.25 + nd*0.40
 		localT := easeOut(clamp01((ov.anim - startT) / 0.35))
 		tx = lerpF(cx+cw*0.5, cx, localT)
@@ -917,52 +781,74 @@ func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
 		tw = lerpF(0, cw, localT)
 		th = lerpF(0, ch, localT)
 		alpha = clamp01(localT * 1.5)
-
-	case ovActive:
-		tx, ty, tw, th = cx, cy, cw, ch
-
 	case ovExiting:
-		// All grid tiles fade out while the left preview zooms to fill the screen.
-		tx, ty, tw, th = cx, cy, cw, ch
 		alpha = lerpF(1, 0, clamp01(ov.anim*2))
 	}
-
 	if tw < 1 || th < 1 || alpha <= 0 {
 		return
 	}
+	r := drawOverviewTileBase(screen, ov.thumbs[i], tx, ty, tw, th, alpha)
+	if ov.phase == ovActive {
+		ov.drawTileBorder(screen, i, r)
+	}
+}
 
-	// imgX/imgY/imgW/imgH track the actual rendered image bounds (aspect-fitted
-	// within the cell). Borders are drawn at these bounds, not the cell bounds.
-	var imgX, imgY, imgW, imgH float64
-
-	img := ov.thumbs[i]
-	if img != nil {
-		iW := float64(img.Bounds().Dx())
-		iH := float64(img.Bounds().Dy())
-		if iW > 0 && iH > 0 {
-			sc := math.Min(tw/iW, th/iH)
-			imgW = iW * sc
-			imgH = iH * sc
-			imgX = tx + (tw-imgW)/2
-			imgY = ty + (th-imgH)/2
-			op := &ebiten.DrawImageOptions{}
-			op.GeoM.Scale(sc, sc)
-			op.GeoM.Translate(imgX, imgY)
-			op.ColorScale.ScaleAlpha(float32(alpha))
-			screen.DrawImage(img, op)
-		}
-	} else {
-		// Placeholder: use cell bounds until the thumbnail loads.
-		imgX, imgY, imgW, imgH = tx, ty, tw, th
+// drawOverviewTileBase draws a thumbnail aspect-fitted into the cell, or a
+// placeholder until it loads, and returns where the image landed.
+func drawOverviewTileBase(dst *ebiten.Image, img *ebiten.Image, tx, ty, tw, th, alpha float64) rectF {
+	if img == nil {
 		if a := uint8(alpha * 200); a > 0 {
-			vector.FillRect(screen,
-				float32(tx), float32(ty), float32(tw), float32(th),
+			vector.FillRect(dst, float32(tx), float32(ty), float32(tw), float32(th),
 				color.RGBA{31, 41, 55, a}, false)
 		}
+		return rectF{x: tx, y: ty, w: tw, h: th}
 	}
+	iw := float64(img.Bounds().Dx())
+	ih := float64(img.Bounds().Dy())
+	if iw <= 0 || ih <= 0 {
+		return rectF{}
+	}
+	sc := math.Min(tw/iw, th/ih)
+	r := rectF{w: iw * sc, h: ih * sc}
+	r.x = tx + (tw-r.w)/2
+	r.y = ty + (th-r.h)/2
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Scale(sc, sc)
+	op.GeoM.Translate(r.x, r.y)
+	op.ColorScale.ScaleAlpha(float32(alpha))
+	op.Filter = ebiten.FilterLinear
+	dst.DrawImage(img, op)
+	return r
+}
 
-	// Selection / hover border — flush against the actual slide image.
-	if ov.phase != ovActive || imgW < 1 || imgH < 1 {
+// tileImageRect returns where tile i's thumbnail sits inside its cell (the
+// whole cell while it is still a placeholder).
+func (ov *overview) tileImageRect(i int) rectF {
+	if i < 0 || i >= len(ov.thumbs) {
+		return rectF{}
+	}
+	x, y, w, h := ov.cellRect(i)
+	img := ov.thumbs[i]
+	if img == nil {
+		return rectF{x: x, y: y, w: w, h: h}
+	}
+	iw := float64(img.Bounds().Dx())
+	ih := float64(img.Bounds().Dy())
+	if iw <= 0 || ih <= 0 {
+		return rectF{}
+	}
+	sc := math.Min(w/iw, h/ih)
+	r := rectF{w: iw * sc, h: ih * sc}
+	r.x = x + (w-r.w)/2
+	r.y = y + (h-r.h)/2
+	return r
+}
+
+// drawTileBorder highlights the selection (rainbow), the slide the overview
+// was opened from (grey) and the hovered tile (white), flush with the image.
+func (ov *overview) drawTileBorder(screen *ebiten.Image, i int, r rectF) {
+	n := len(ov.pageList)
+	if i < 0 || i >= n || r.w < 1 || r.h < 1 {
 		return
 	}
 	switch {
@@ -971,26 +857,17 @@ func (g *Game) drawOverviewTile(screen *ebiten.Image, i int) {
 		if n > 1 {
 			gradT = float32(i) / float32(n-1)
 		}
-		c := rainbowAt(gradT, 255)
-		bw := float64(2)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
-		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
+		drawOverviewBorder(screen, r, 2, rainbowAt(gradT, 255))
 	case i == ov.fromIdx:
-		// Dim grey border — "you are here" indicator.
-		c := color.RGBA{180, 180, 180, 160}
-		bw := float64(2)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
-		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
+		drawOverviewBorder(screen, r, 2, color.RGBA{180, 180, 180, 160})
 	case i == ov.hoverIdx:
-		c := color.RGBA{255, 255, 255, 120}
-		bw := float64(1)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY+imgH-bw), float32(imgW), float32(bw), c, false)
-		vector.FillRect(screen, float32(imgX), float32(imgY), float32(bw), float32(imgH), c, false)
-		vector.FillRect(screen, float32(imgX+imgW-bw), float32(imgY), float32(bw), float32(imgH), c, false)
+		drawOverviewBorder(screen, r, 1, color.RGBA{255, 255, 255, 120})
 	}
+}
+
+func drawOverviewBorder(screen *ebiten.Image, r rectF, bw float64, c color.Color) {
+	vector.FillRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(bw), c, false)
+	vector.FillRect(screen, float32(r.x), float32(r.y+r.h-bw), float32(r.w), float32(bw), c, false)
+	vector.FillRect(screen, float32(r.x), float32(r.y), float32(bw), float32(r.h), c, false)
+	vector.FillRect(screen, float32(r.x+r.w-bw), float32(r.y), float32(bw), float32(r.h), c, false)
 }

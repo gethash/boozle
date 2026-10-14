@@ -1,13 +1,11 @@
 // Package app drives the boozle presenter: it owns the Ebiten Game,
-// the PDF renderer, the page cache, the auto-advance timer, and input handling.
+// the render pipeline, the auto-advance timer, and input handling.
 package app
 
 import (
 	"errors"
 	"fmt"
-	"image"
 	"image/color"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,21 +27,13 @@ var ErrQuit = errors.New("boozle: quit")
 
 const (
 	// Cache budgets are sized at runtime by autoBudget(bufW, bufH) — see
-	// onLayoutChanged. The constants here are floor/ceiling and the initial
-	// value used before Layout has run. The user can override the auto sizing
-	// via --cache-mb (cfg.CacheMB > 0).
+	// pipeline.resizeFor. The constants here are floor/ceiling and the
+	// initial value used before Layout has run. The user can override the
+	// auto sizing via --cache-mb (cfg.CacheMB > 0).
 	cacheBudgetMin     = 32 << 20  // 32 MB floor (small windows)
 	cacheBudgetMax     = 192 << 20 // 192 MB ceiling — past this, more pages don't help typical nav
 	cacheBudgetPages   = 4         // target ~4 pages worth at current bufW×bufH
 	cacheBudgetInitial = cacheBudgetMin
-
-	// prefetchQueue is bounded so input spam doesn't pile up work.
-	prefetchQueue = 8
-
-	// maxUploadsPerFrame caps GPU upload work done on the main goroutine
-	// each tick to keep frame budget. Each upload is a NewImage+WritePixels
-	// pair (~1–3 ms on 4K).
-	maxUploadsPerFrame = 2
 
 	presenterCmdQuit       = "quit"
 	presenterCmdEscape     = "escape"
@@ -66,49 +56,47 @@ const (
 	presenterCmdPageUp     = "page-up"
 	presenterCmdDigit      = "digit"
 	presenterCmdOverviewGo = "overview-go"
+
+	// transitionMaxWaitFrames bounds how long a transition waits for the
+	// target slide's render before animating anyway (e.g. a broken page).
+	transitionMaxWaitFrames = 60
 )
 
 // Run opens the presentation window and blocks until the user quits.
 func Run(cfg config.Config) error {
+	opened := time.Now()
 	doc, err := pdf.Open(cfg.PDFPath)
 	if err != nil {
 		return err
 	}
 	defer doc.Close()
+	if cfg.DebugStats {
+		fmt.Fprintf(os.Stderr, "[boozle audience] pdf open %v (%d pages)\n", time.Since(opened).Round(time.Millisecond), doc.PageCount())
+	}
 
 	pageList := buildPageList(doc.PageCount(), cfg)
 	if len(pageList) == 0 {
 		return fmt.Errorf("no pages to play (page count = %d, --pages = %v)", doc.PageCount(), cfg.PageRange)
 	}
 
-	cache := pdf.NewCache(cacheBudgetInitial)
-	defer cache.Clear()
-	if cfg.CacheMB > 0 {
-		cache.Resize(cfg.CacheMB << 20)
-	}
-
-	pf := pdf.NewPrefetcher(doc, cache, prefetchQueue)
-	pf.Start()
-	defer pf.Stop()
-
-	thumbStore := newOverviewThumbStore(cfg.PDFPath)
-	defer thumbStore.Clear()
+	pipe := newPipeline(doc, cfg.PDFPath, cfg.CacheMB)
+	defer pipe.close()
 
 	auto := timer.New(cfg.Auto, cfg.PerPage)
 	startIdx := initialIndex(pageList, cfg.StartPage)
 	auto.Reset(pageList[startIdx] + 1)
 
 	g := &Game{
-		cfg:        cfg,
-		bg:         color.RGBA{cfg.Background.R, cfg.Background.G, cfg.Background.B, cfg.Background.A},
-		doc:        doc,
-		cache:      cache,
-		prefetcher: pf,
-		thumbStore: thumbStore,
-		auto:       auto,
-		pageList:   pageList,
-		listIdx:    startIdx,
-		startedAt:  time.Now(),
+		cfg:       cfg,
+		bg:        color.RGBA{cfg.Background.R, cfg.Background.G, cfg.Background.B, cfg.Background.A},
+		pipe:      pipe,
+		auto:      auto,
+		pageList:  pageList,
+		listIdx:   startIdx,
+		startedAt: time.Now(),
+	}
+	if cfg.DebugStats {
+		g.stats = &statsReporter{role: "audience"}
 	}
 
 	g.trans.style = parseTransStyle(cfg.Transition)
@@ -119,30 +107,18 @@ func Run(cfg config.Config) error {
 		if err := validatePresenterMonitor(cfg); err != nil {
 			return err
 		}
-		socketPath := ipc.SocketPath(os.Getpid())
-		srv, err := ipc.Listen(socketPath)
+		srv, err := ipc.Listen(ipc.Hello{PageList: pageList, Notes: cfg.Notes, StartedAt: g.startedAt, Loop: cfg.Loop})
 		if err != nil {
 			return fmt.Errorf("presenter IPC: %w", err)
 		}
 		defer srv.Close()
-		go srv.AcceptLoop()
+		go srv.Accept()
 
 		self, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("resolve executable: %w", err)
 		}
-		args := []string{
-			"--monitor", strconv.Itoa(cfg.PresenterMonitor),
-			"--_presenter-socket", socketPath,
-		}
-		if cfg.CacheMB > 0 {
-			args = append(args, "--cache-mb", strconv.Itoa(cfg.CacheMB))
-		}
-		if cfg.RenderScale > 0 {
-			args = append(args, "--render-scale", strconv.FormatFloat(cfg.RenderScale, 'f', -1, 64))
-		}
-		args = append(args, cfg.PDFPath)
-		cmd := exec.Command(self, args...)
+		cmd := exec.Command(self, presenterArgs(cfg, srv.Path())...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
@@ -167,14 +143,13 @@ func Run(cfg config.Config) error {
 	ebiten.SetWindowTitle(fmt.Sprintf("boozle — %s", filepath.Base(cfg.PDFPath)))
 	setWindowIcon()
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
+	ebiten.SetScreenClearedEveryFrame(false)
 	if err := display.PickMonitor(cfg.MonitorIdx); err != nil {
 		return err
 	}
+	ebiten.SetWindowSize(1280, 800)
 	var runGame ebiten.Game = g
-	if cfg.NoFullscreen {
-		ebiten.SetWindowSize(1280, 800)
-	} else {
-		ebiten.SetWindowSize(1280, 800)
+	if !cfg.NoFullscreen {
 		runGame = &fullscreenOnMonitor{game: g, monitorIdx: cfg.MonitorIdx}
 	}
 
@@ -182,6 +157,27 @@ func Run(cfg config.Config) error {
 		return err
 	}
 	return nil
+}
+
+// presenterArgs builds the command line for the presenter subprocess.
+func presenterArgs(cfg config.Config, socketPath string) []string {
+	args := []string{
+		"--monitor", strconv.Itoa(cfg.PresenterMonitor),
+		"--_presenter-socket", socketPath,
+	}
+	if cfg.NoFullscreen {
+		args = append(args, "--no-fullscreen")
+	}
+	if cfg.CacheMB > 0 {
+		args = append(args, "--cache-mb", strconv.Itoa(cfg.CacheMB))
+	}
+	if cfg.RenderScale > 0 {
+		args = append(args, "--render-scale", strconv.FormatFloat(cfg.RenderScale, 'f', -1, 64))
+	}
+	if cfg.DebugStats {
+		args = append(args, "--debug-stats")
+	}
+	return append(args, cfg.PDFPath)
 }
 
 // buildPageList resolves the configured playback pages or PageRange against
@@ -228,15 +224,12 @@ func validatePresenterMonitor(cfg config.Config) error {
 	return nil
 }
 
-// Game implements ebiten.Game.
+// Game implements ebiten.Game for the audience window.
 type Game struct {
-	cfg        config.Config
-	bg         color.RGBA
-	doc        *pdf.Doc
-	cache      *pdf.Cache
-	prefetcher *pdf.Prefetcher
-	thumbStore *overviewThumbStore
-	auto       *timer.Auto
+	cfg  config.Config
+	bg   color.RGBA
+	pipe *pipeline
+	auto *timer.Auto
 
 	pageList  []int // 0-indexed page numbers, in playback order
 	listIdx   int   // index into pageList
@@ -244,11 +237,10 @@ type Game struct {
 
 	digitBuf string // numeric-jump input buffer, e.g. "12" → Enter → page 12
 
-	display       *ebiten.Image
-	displayKey    pdf.CacheKey // exact key currently backing g.display (zero if mipmap-reused)
-	displayWanted pdf.CacheKey // last requested key — distinguishes "exact" from "stand-in"
-	displayPinned bool         // true while the cache entry at displayKey is Pin'd
-	displayBounds renderBounds
+	disp        pinnedSlide  // image on screen; may lag listIdx until its render lands
+	dispBounds  renderBounds // where disp is drawn
+	dispWanted  pdf.CacheKey // exact render wanted for the current page
+	prefetchFor prefetchSig  // inputs the prefetch queue was last built from
 
 	blackout, whiteout bool // visual blank-out states (mutually exclusive)
 
@@ -263,20 +255,30 @@ type Game struct {
 
 	pageLabel pageLabelCache // cached fmt.Sprintf for the bottom-right counter
 
-	trans         transition
-	ov            overview
+	trans transition
+	ov    overview
+
 	stateCh       chan ipc.PresenterState // nil when presenter view is disabled
 	presenterCmds <-chan ipc.PresenterCommand
+	lastSent      ipc.PresenterState
+	lastSentAt    time.Time
+
+	redraw redrawGate[audienceFrame]
+	stats  *statsReporter
 }
 
-// renderBounds describes how to position and scale a rendered slide on the
-// screen. dstX/dstY are pixel offsets; dstW/dstH are the on-screen size;
-// srcW/srcH are the actual source-image dimensions (may differ from dst*
-// when serving a larger cached image during a resize, which is then
-// linearly downsampled by Ebiten).
+// renderBounds is where a slide is drawn on screen, in buffer pixels. The
+// image is scaled to fit when its size differs (stand-in renders).
 type renderBounds struct {
 	dstX, dstY, dstW, dstH int
-	srcW, srcH             int
+}
+
+func (b renderBounds) rect() rectF {
+	return rectF{x: float64(b.dstX), y: float64(b.dstY), w: float64(b.dstW), h: float64(b.dstH)}
+}
+
+type prefetchSig struct {
+	listIdx, bufW, bufH, dir int
 }
 
 // pageLabelCache memoises the "12 / 84"-style page counter so we don't
@@ -296,31 +298,22 @@ func (p *pageLabelCache) String(listIdx, total int) string {
 	return p.s
 }
 
-// Update processes input and re-rasterizes when the page or buffer changes.
+// Update processes input and keeps the displayed slide in step with listIdx.
 func (g *Game) Update() error {
 	if g.quit {
 		return ErrQuit
 	}
-	g.drainPendingUploads()
-	presenterCmds := g.drainPresenterCommands()
-
-	// Auto-hide cursor after ~3 s of inactivity.
-	cx, cy := ebiten.CursorPosition()
-	if cx != g.lastCursorX || cy != g.lastCursorY {
-		g.lastCursorX = cx
-		g.lastCursorY = cy
-		g.cursorIdleFrames = 0
-		ebiten.SetCursorMode(ebiten.CursorModeVisible)
-	} else {
-		g.cursorIdleFrames++
-		if g.cursorIdleFrames > 180 {
-			ebiten.SetCursorMode(ebiten.CursorModeHidden)
-		}
+	if g.pipe != nil {
+		g.pipe.drain()
 	}
+	presenterCmds := g.drainPresenterCommands()
+	g.updateCursor()
+	defer func() { g.stats.tick(g.pipe, g.listIdx) }()
 
 	// Overview intercepts Escape and all navigation while active.
 	if g.ov.phase != ovOff {
 		err := g.updateOverview(presenterCmds)
+		g.refreshDisplay()
 		g.broadcastState()
 		return err
 	}
@@ -335,6 +328,7 @@ func (g *Game) Update() error {
 	if (inpututil.IsKeyJustPressed(ebiten.KeyTab) || presenterCmdPressed(presenterCmds, presenterCmdTab)) &&
 		g.bufW > 0 && g.bufH > 0 && !g.blackout && !g.whiteout {
 		g.openOverview()
+		g.broadcastState()
 		return nil
 	}
 
@@ -367,25 +361,90 @@ func (g *Game) Update() error {
 		g.auto.Reset(g.currentPage() + 1)
 	}
 
+	g.refreshDisplay()
+
+	// A transition starts animating once the target slide is on screen,
+	// so a slow render never eats into the animation.
 	if g.trans.active {
-		g.trans.frame++
-		if g.trans.frame >= g.trans.frames {
-			g.trans.clear()
+		if g.displayIsCurrent() || g.trans.wait >= transitionMaxWaitFrames {
+			g.trans.frame++
+			if g.trans.frame >= g.trans.frames {
+				g.trans.clear()
+			}
+		} else {
+			g.trans.wait++
 		}
 	}
 
-	if g.bufW > 0 && g.bufH > 0 {
-		if err := g.maybeRefreshDisplay(); err != nil {
-			return err
-		}
-		g.prefetchNeighbors()
-	}
 	g.broadcastState()
 	return nil
 }
 
-// Draw renders the current frame.
+func (g *Game) updateCursor() {
+	// Auto-hide cursor after ~3 s of inactivity.
+	cx, cy := ebiten.CursorPosition()
+	if cx != g.lastCursorX || cy != g.lastCursorY {
+		g.lastCursorX = cx
+		g.lastCursorY = cy
+		g.cursorIdleFrames = 0
+		ebiten.SetCursorMode(ebiten.CursorModeVisible)
+	} else {
+		g.cursorIdleFrames++
+		if g.cursorIdleFrames == 180 {
+			ebiten.SetCursorMode(ebiten.CursorModeHidden)
+		}
+	}
+}
+
+// audienceFrame captures everything Draw depends on, so unchanged frames
+// can be skipped.
+type audienceFrame struct {
+	img                *ebiten.Image
+	bounds             renderBounds
+	transActive        bool
+	transFrame         int
+	blackout, whiteout bool
+	listIdx            int
+	fraction           float64
+	paused             bool
+	ovPhase            ovPhase
+	ovAnim             float64
+	ovSel, ovHover     int
+	ovVersion          int
+	ovPreview          *ebiten.Image
+	bufW, bufH         int
+}
+
+func (g *Game) frame() audienceFrame {
+	f := audienceFrame{
+		img:         g.disp.img,
+		bounds:      g.dispBounds,
+		transActive: g.trans.active,
+		transFrame:  g.trans.frame,
+		blackout:    g.blackout,
+		whiteout:    g.whiteout,
+		listIdx:     g.listIdx,
+		bufW:        g.bufW,
+		bufH:        g.bufH,
+	}
+	if g.cfg.Progress {
+		f.fraction = g.autoProgressFraction()
+		f.paused = g.auto.Paused()
+	}
+	if g.shouldDrawOverviewOnAudience() {
+		f.ovPhase, f.ovAnim = g.ov.phase, g.ov.anim
+		f.ovSel, f.ovHover, f.ovVersion = g.ov.selIdx, g.ov.hoverIdx, g.ov.version
+		f.ovPreview = g.ov.previewImage(g.pipe, g.disp.img)
+	}
+	return f
+}
+
+// Draw renders the current frame, or nothing when the previous frame is
+// still accurate (the screen is not cleared between frames).
 func (g *Game) Draw(screen *ebiten.Image) {
+	if !g.redraw.needed(g.frame(), time.Now()) {
+		return
+	}
 	resetTextPool()
 	switch {
 	case g.blackout:
@@ -396,21 +455,33 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		return
 	}
 	screen.Fill(g.bg)
-	if g.display != nil {
-		if g.trans.active && g.trans.prevImg != nil {
+	if g.disp.img != nil {
+		if g.trans.active && g.trans.prev.img != nil {
 			g.drawTransition(screen)
 		} else {
-			op := &ebiten.DrawImageOptions{}
-			applyDisplayScale(&op.GeoM, g.displayBounds)
-			op.GeoM.Translate(float64(g.displayBounds.dstX), float64(g.displayBounds.dstY))
-			op.Filter = ebiten.FilterLinear
-			screen.DrawImage(g.display, op)
+			drawSlide(screen, g.disp.img, g.dispBounds, 0, 1)
 		}
 	}
 	g.drawProgressOverlay(screen)
 	if g.shouldDrawOverviewOnAudience() {
-		g.drawOverview(screen)
+		g.ov.draw(screen, g.pipe, g.disp.img, g.dispBounds.rect())
 	}
+}
+
+// drawSlide draws img scaled into b, shifted by dx pixels, with alpha.
+func drawSlide(screen, img *ebiten.Image, b renderBounds, dx float64, alpha float32) {
+	iw, ih := img.Bounds().Dx(), img.Bounds().Dy()
+	if iw <= 0 || ih <= 0 {
+		return
+	}
+	op := &ebiten.DrawImageOptions{}
+	if iw != b.dstW || ih != b.dstH {
+		op.GeoM.Scale(float64(b.dstW)/float64(iw), float64(b.dstH)/float64(ih))
+	}
+	op.GeoM.Translate(float64(b.dstX)+dx, float64(b.dstY))
+	op.ColorScale.ScaleAlpha(alpha)
+	op.Filter = ebiten.FilterLinear
+	screen.DrawImage(img, op)
 }
 
 func (g *Game) shouldDrawOverviewOnAudience() bool {
@@ -421,44 +492,19 @@ func (g *Game) shouldDrawOverviewOnAudience() bool {
 //
 // outsideWidth/outsideHeight come from Ebiten in device-independent units;
 // multiplying by the active monitor's scale factor produces a pixel-sized
-// buffer that PDFium then rasterises into — pixel-perfect on Retina, 4K,
-// and mixed-DPI multi-monitor setups. When the user drags the window to a
-// monitor with a different DPI, Layout sees new outside dims, the cache
-// key changes, and we re-rasterise.
+// buffer that PDFium then rasterises into — pixel-perfect on Retina and 4K.
+// When the buffer changes (resize, monitor swap) the cache key changes and
+// slides are re-rasterised; the old render stands in meanwhile.
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	sf := ebiten.Monitor().DeviceScaleFactor()
-	if sf <= 0 {
-		sf = 1
-	}
-	pxW := int(math.Round(float64(outsideWidth) * sf))
-	pxH := int(math.Round(float64(outsideHeight) * sf))
-	if rs := g.cfg.RenderScale; rs > 0 && rs < 1 {
-		pxW = max(1, int(math.Round(float64(pxW)*rs)))
-		pxH = max(1, int(math.Round(float64(pxH)*rs)))
-	}
+	pxW, pxH := pixelBuffer(outsideWidth, outsideHeight, g.cfg.RenderScale)
 	if pxW != g.bufW || pxH != g.bufH {
 		g.bufW = pxW
 		g.bufH = pxH
-		g.onLayoutChanged()
+		if g.pipe != nil {
+			g.pipe.resizeFor(pxW, pxH, g.cfg.CacheMB)
+		}
 	}
 	return pxW, pxH
-}
-
-// onLayoutChanged is called when the pixel buffer dimensions change (window
-// resize or DPI/monitor swap). It auto-sizes the cache budget and proactively
-// purges entries whose dimensions exceed the new buffer — those are the
-// ones most likely to become stale and waste GPU memory.
-func (g *Game) onLayoutChanged() {
-	if g.cache == nil || g.bufW <= 0 || g.bufH <= 0 {
-		return
-	}
-	if g.cfg.CacheMB <= 0 {
-		g.cache.Resize(autoBudget(g.bufW, g.bufH))
-	}
-	// PurgeNotMatching keeps smaller-or-equal entries: those serve as
-	// linearly-downsampled stand-ins via the mipmap-reuse path until the
-	// prefetcher catches up at the new resolution.
-	g.cache.PurgeNotMatching(g.bufW, g.bufH)
 }
 
 // autoBudget sizes the GPU image cache to hold ~cacheBudgetPages full-buffer
@@ -468,18 +514,88 @@ func autoBudget(bufW, bufH int) int {
 	if bufW <= 0 || bufH <= 0 {
 		return cacheBudgetMin
 	}
-	perPage := bufW * bufH * 4
-	budget := perPage * cacheBudgetPages
-	if budget < cacheBudgetMin {
-		return cacheBudgetMin
-	}
-	if budget > cacheBudgetMax {
-		return cacheBudgetMax
-	}
-	return budget
+	return min(cacheBudgetMax, max(cacheBudgetMin, bufW*bufH*4*cacheBudgetPages))
 }
 
 func (g *Game) currentPage() int { return g.pageList[g.listIdx] }
+
+// displayIsCurrent reports whether the image on screen shows the current
+// page (possibly as a scaled stand-in).
+func (g *Game) displayIsCurrent() bool {
+	return g.disp.img != nil && g.disp.key.Page == g.currentPage()
+}
+
+// refreshDisplay keeps the on-screen slide in step with listIdx without
+// ever rendering on this goroutine: an exact cache hit is a pointer swap;
+// otherwise the page is requested urgently and the best cached render of
+// it (any size) stands in. If the page isn't cached at all, the previous
+// slide stays up until the render lands.
+func (g *Game) refreshDisplay() {
+	if g.pipe == nil || g.bufW <= 0 || g.bufH <= 0 {
+		return
+	}
+	want, offX, offY, ok := g.pipe.fit(g.currentPage(), g.bufW, g.bufH)
+	if !ok {
+		return
+	}
+	if want != g.dispWanted {
+		g.dispWanted = want
+		g.pipe.requestNow(want)
+	}
+	if g.disp.key != want {
+		if img, key := g.pipe.resolve(want); img != nil {
+			g.disp.set(g.pipe.slides, img, key)
+		}
+	}
+	if g.displayIsCurrent() {
+		g.dispBounds = renderBounds{dstX: offX, dstY: offY, dstW: want.W, dstH: want.H}
+	}
+	g.updatePrefetch()
+}
+
+// updatePrefetch queues the slides the next navigation will most likely
+// need, ordered by the direction of travel. The queue is replaced (not
+// appended to) whenever position or size changes, so stale work is dropped.
+func (g *Game) updatePrefetch() {
+	sig := prefetchSig{listIdx: g.listIdx, bufW: g.bufW, bufH: g.bufH, dir: g.lastNavDir}
+	if sig == g.prefetchFor {
+		return
+	}
+	g.prefetchFor = sig
+	var deltas []int
+	switch {
+	case g.lastNavDir > 0:
+		deltas = []int{1, 2, 3, -1}
+	case g.lastNavDir < 0:
+		deltas = []int{-1, -2, -3, 1}
+	default:
+		deltas = []int{1, -1}
+	}
+	var keys []pdf.CacheKey
+	for _, d := range deltas {
+		idx, ok := g.wrapIndex(g.listIdx + d)
+		if !ok {
+			continue
+		}
+		if key, _, _, ok := g.pipe.fit(g.pageList[idx], g.bufW, g.bufH); ok {
+			keys = append(keys, key)
+		}
+	}
+	g.pipe.sched.SetPrefetch(g.pipe.missing(keys...))
+}
+
+// wrapIndex maps a list index that may run off either end onto the list,
+// honouring --loop.
+func (g *Game) wrapIndex(idx int) (int, bool) {
+	n := len(g.pageList)
+	if idx >= 0 && idx < n {
+		return idx, true
+	}
+	if !g.cfg.Loop || n == 0 {
+		return 0, false
+	}
+	return (idx%n + n) % n, true
+}
 
 func (g *Game) drainPresenterCommands() []ipc.PresenterCommand {
 	if g.presenterCmds == nil {
@@ -506,28 +622,19 @@ func presenterCmdPressed(cmds []ipc.PresenterCommand, name string) bool {
 	return false
 }
 
-// broadcastState sends the current presentation state to the presenter slave.
-// Non-blocking: drops stale state if the IPC goroutine hasn't caught up.
-func (g *Game) broadcastState() {
-	if g.stateCh == nil {
-		return
-	}
+// presenterState snapshots what the presenter window needs to know.
+func (g *Game) presenterState() ipc.PresenterState {
 	nextPage := -1
-	if g.listIdx+1 < len(g.pageList) {
-		nextPage = g.pageList[g.listIdx+1]
-	} else if g.cfg.Loop && len(g.pageList) > 0 {
-		nextPage = g.pageList[0]
+	if idx, ok := g.wrapIndex(g.listIdx + 1); ok {
+		nextPage = g.pageList[idx]
 	}
 	st := ipc.PresenterState{
 		Page:           g.currentPage(),
 		ListIndex:      g.listIdx,
-		PageList:       append([]int(nil), g.pageList...),
-		Total:          len(g.pageList),
-		Fraction:       g.autoProgressFraction(),
-		Paused:         g.auto.Paused(),
 		NextPage:       nextPage,
-		ElapsedSeconds: int64(time.Since(g.startedAt).Seconds()),
-		Notes:          g.cfg.Notes[g.currentPage()+1],
+		Paused:         g.auto.Paused(),
+		Fraction:       g.autoProgressFraction(),
+		FractionPerSec: g.auto.Rate(),
 	}
 	if g.ov.phase != ovOff {
 		st.Overview = ipc.PresenterOverviewState{
@@ -539,7 +646,25 @@ func (g *Game) broadcastState() {
 			ExitToIndex:   g.ov.exitToIdx,
 		}
 	}
-	// Drain-then-send so the slave always gets the latest frame, never a stale one.
+	return st
+}
+
+// broadcastState sends the presentation state to the presenter process when
+// it changed (the auto-advance fraction is extrapolated on the other side,
+// with a once-a-second refresh to correct drift). Non-blocking: if the IPC
+// goroutine is behind, the stale queued state is replaced.
+func (g *Game) broadcastState() {
+	if g.stateCh == nil {
+		return
+	}
+	st := g.presenterState()
+	cur, last := st, g.lastSent
+	cur.Fraction, last.Fraction = 0, 0
+	now := time.Now()
+	if !g.lastSentAt.IsZero() && cur == last && now.Sub(g.lastSentAt) < time.Second {
+		return
+	}
+	g.lastSent, g.lastSentAt = st, now
 	select {
 	case g.stateCh <- st:
 	default:
@@ -706,231 +831,4 @@ func (g *Game) jumpTo1Indexed(n int) {
 		}
 	}
 	g.listIdx = len(g.pageList) - 1
-}
-
-// maybeRefreshDisplay swaps in the current page's rendered image when the
-// page or pixel buffer changes. Cache hits are pointer swaps (no upload);
-// misses fall back to a synchronous render + WritePixels on the main thread.
-//
-// During a resize/DPI change the cache may not have an entry at the new
-// dimensions yet; rather than block on a fresh PDFium render, we look for a
-// larger same-page entry and let Ebiten linearly downsample it. The prefetcher
-// then renders the exact-size version which lands a frame or two later.
-func (g *Game) maybeRefreshDisplay() error {
-	pageIdx := g.currentPage()
-	page, err := g.doc.PageSize(pageIdx)
-	if err != nil {
-		return err
-	}
-	w, h, offX, offY := aspectFit(page.WidthPoints, page.HeightPoints, g.bufW, g.bufH)
-	if w <= 0 || h <= 0 {
-		return nil
-	}
-	requestKey := pdf.CacheKey{Page: pageIdx, W: w, H: h}
-	g.displayWanted = requestKey
-
-	// Fast path: g.display already shows the exact requested key.
-	if g.display != nil && g.displayKey == requestKey {
-		return nil
-	}
-
-	// Exact cache hit — pointer swap, no upload.
-	if cached, ok := g.cache.Get(requestKey); ok {
-		g.adoptDisplay(cached.(*ebiten.Image), requestKey,
-			renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: w, srcH: h})
-		return nil
-	}
-
-	// Mipmap reuse: any cached entry for the same page at ≥requested size and
-	// matching aspect can be downsampled by Ebiten while we wait for the
-	// prefetcher to render the exact-size version.
-	if mipKey, ok := g.findScalable(requestKey); ok {
-		if cached, ok := g.cache.Get(mipKey); ok {
-			g.adoptDisplay(cached.(*ebiten.Image), mipKey,
-				renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: mipKey.W, srcH: mipKey.H})
-			g.prefetcher.Request(requestKey)
-			return nil
-		}
-	}
-
-	// Cache miss: render synchronously, upload, insert.
-	img, cleanup, err := g.doc.RenderPage(requestKey.Page, requestKey.W, requestKey.H)
-	if err != nil {
-		return err
-	}
-	eimg := uploadRGBA(img)
-	if cleanup != nil {
-		cleanup()
-	}
-	g.cache.Put(requestKey, eimg)
-	b := img.Bounds()
-	g.adoptDisplay(eimg, requestKey,
-		renderBounds{dstX: offX, dstY: offY, dstW: w, dstH: h, srcW: b.Dx(), srcH: b.Dy()})
-	return nil
-}
-
-// adoptDisplay swaps g.display to a new cache-owned image, pinning the new
-// entry so it cannot be evicted while displayed (and unpinning the old one).
-// All cleanup of the previous image is the cache's responsibility.
-func (g *Game) adoptDisplay(eimg *ebiten.Image, key pdf.CacheKey, bounds renderBounds) {
-	if g.displayPinned && g.cache != nil {
-		g.cache.Unpin(g.displayKey)
-		g.displayPinned = false
-	}
-	g.display = eimg
-	g.displayKey = key
-	g.displayBounds = bounds
-	if g.cache != nil && key != (pdf.CacheKey{}) {
-		g.cache.Pin(key)
-		g.displayPinned = true
-	}
-}
-
-// findScalable scans the cache for an entry of the same page with both
-// dimensions ≥ the requested size and a near-identical aspect ratio. Used
-// only during a transient resize to avoid blocking on PDFium for one frame.
-func (g *Game) findScalable(req pdf.CacheKey) (pdf.CacheKey, bool) {
-	if req.W <= 0 || req.H <= 0 {
-		return pdf.CacheKey{}, false
-	}
-	wantAspect := float64(req.W) / float64(req.H)
-	var best pdf.CacheKey
-	bestArea := 0
-	g.cache.Range(func(k pdf.CacheKey) {
-		if k.Page != req.Page || k.W < req.W || k.H < req.H {
-			return
-		}
-		gotAspect := float64(k.W) / float64(k.H)
-		if math.Abs(gotAspect-wantAspect)/wantAspect > 0.005 {
-			return
-		}
-		// Prefer the smallest-area scalable entry — closest to native res.
-		area := k.W * k.H
-		if best.W == 0 || area < bestArea {
-			best = k
-			bestArea = area
-		}
-	})
-	return best, best.W != 0
-}
-
-// uploadRGBA creates a fresh GPU image at rgba's actual bounds and uploads
-// the pixel data via WritePixels (faster than NewImageFromImage on big buffers).
-func uploadRGBA(rgba *image.RGBA) *ebiten.Image {
-	b := rgba.Bounds()
-	eimg := ebiten.NewImage(b.Dx(), b.Dy())
-	eimg.WritePixels(rgba.Pix)
-	return eimg
-}
-
-// drainPendingUploads moves prefetcher-rendered RGBA pixels onto the GPU
-// (this must happen on the main goroutine for Ebiten) and inserts them
-// into the cache. Bounded per frame to keep latency in check.
-func (g *Game) drainPendingUploads() {
-	if g.prefetcher == nil {
-		return
-	}
-	uploads := g.prefetcher.Uploads()
-	for i := 0; i < maxUploadsPerFrame; i++ {
-		select {
-		case job := <-uploads:
-			if g.cache.Has(job.Key) {
-				// A synchronous render on the main thread already cached this
-				// key while the prefetcher had it in flight — drop the dupe.
-				if job.Cleanup != nil {
-					job.Cleanup()
-				}
-				if job.Done != nil {
-					job.Done()
-				}
-				continue
-			}
-			eimg := uploadRGBA(job.RGBA)
-			if job.Cleanup != nil {
-				job.Cleanup()
-			}
-			g.cache.Put(job.Key, eimg)
-			if job.Done != nil {
-				job.Done()
-			}
-		default:
-			return
-		}
-	}
-}
-
-// applyDisplayScale multiplies the GeoM by the source-to-destination ratio
-// when serving a cached image at a different size than the requested layout
-// (the mipmap-reuse path). When source == destination, this is a no-op.
-func applyDisplayScale(g *ebiten.GeoM, b renderBounds) {
-	if b.srcW <= 0 || b.srcH <= 0 || (b.srcW == b.dstW && b.srcH == b.dstH) {
-		return
-	}
-	sx := float64(b.dstW) / float64(b.srcW)
-	sy := float64(b.dstH) / float64(b.srcH)
-	g.Scale(sx, sy)
-}
-
-// prefetchNeighbors pushes render hints for the next few neighbors, ordered
-// by recent navigation direction so forward marches keep the queue ahead of
-// the user. Drops are silent: the prefetcher's queue is bounded.
-func (g *Game) prefetchNeighbors() {
-	if len(g.pageList) <= 1 {
-		return
-	}
-	var deltas []int
-	switch {
-	case g.lastNavDir > 0:
-		deltas = []int{1, 2, 3, -1}
-	case g.lastNavDir < 0:
-		deltas = []int{-1, -2, -3, 1}
-	default:
-		deltas = []int{1, -1}
-	}
-	for _, delta := range deltas {
-		idx := g.listIdx + delta
-		switch {
-		case idx < 0:
-			if !g.cfg.Loop {
-				continue
-			}
-			idx = (idx%len(g.pageList) + len(g.pageList)) % len(g.pageList)
-		case idx >= len(g.pageList):
-			if !g.cfg.Loop {
-				continue
-			}
-			idx = idx % len(g.pageList)
-		}
-		pageIdx := g.pageList[idx]
-		page, err := g.doc.PageSize(pageIdx)
-		if err != nil {
-			continue
-		}
-		w, h, _, _ := aspectFit(page.WidthPoints, page.HeightPoints, g.bufW, g.bufH)
-		if w > 0 && h > 0 {
-			g.prefetcher.Request(pdf.CacheKey{Page: pageIdx, W: w, H: h})
-		}
-	}
-}
-
-// aspectFit returns the largest (w, h) that fits inside (dstW, dstH) while
-// preserving srcW:srcH, plus the centering offset.
-func aspectFit(srcW, srcH float64, dstW, dstH int) (w, h, offX, offY int) {
-	if srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 {
-		return 0, 0, 0, 0
-	}
-	sx := float64(dstW) / srcW
-	sy := float64(dstH) / srcH
-	s := math.Min(sx, sy)
-	w = int(math.Round(srcW * s))
-	h = int(math.Round(srcH * s))
-	if w > dstW {
-		w = dstW
-	}
-	if h > dstH {
-		h = dstH
-	}
-	offX = (dstW - w) / 2
-	offY = (dstH - h) / 2
-	return
 }

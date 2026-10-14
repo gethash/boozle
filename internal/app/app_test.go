@@ -235,7 +235,6 @@ func TestBroadcastStateIncludesPresenterMetadata(t *testing.T) {
 	a := timer.New(10*time.Second, nil)
 	a.Reset(3)
 	g := &Game{
-		cfg:       config.Config{Notes: map[int]string{5: "Presenter note"}},
 		auto:      a,
 		pageList:  []int{2, 4, 6},
 		listIdx:   1,
@@ -245,17 +244,55 @@ func TestBroadcastStateIncludesPresenterMetadata(t *testing.T) {
 
 	g.broadcastState()
 	st := <-g.stateCh
-	if st.Page != 4 || st.ListIndex != 1 || st.Total != 3 || st.NextPage != 6 {
-		t.Fatalf("state page metadata = %+v, want page=4 index=1 total=3 next=6", st)
+	if st.Page != 4 || st.ListIndex != 1 || st.NextPage != 6 {
+		t.Fatalf("state page metadata = %+v, want page=4 index=1 next=6", st)
 	}
-	if !reflect.DeepEqual(st.PageList, []int{2, 4, 6}) {
-		t.Fatalf("PageList = %v, want [2 4 6]", st.PageList)
+	if st.FractionPerSec != 0.1 {
+		t.Fatalf("FractionPerSec = %v, want 0.1 for a 10s auto-advance", st.FractionPerSec)
 	}
-	if st.ElapsedSeconds < 89 || st.ElapsedSeconds > 91 {
-		t.Fatalf("ElapsedSeconds = %d, want about 90", st.ElapsedSeconds)
+
+	g.listIdx = 2
+	g.broadcastState()
+	if st := <-g.stateCh; st.NextPage != -1 {
+		t.Fatalf("NextPage on last slide without --loop = %d, want -1", st.NextPage)
 	}
-	if st.Notes != "Presenter note" {
-		t.Fatalf("Notes = %q, want presenter note", st.Notes)
+	g.cfg.Loop = true
+	g.broadcastState()
+	if st := <-g.stateCh; st.NextPage != 2 {
+		t.Fatalf("NextPage on last slide with --loop = %d, want first page 2", st.NextPage)
+	}
+}
+
+func TestBroadcastStateOnlySendsChanges(t *testing.T) {
+	a := timer.New(10*time.Second, nil)
+	a.Reset(1)
+	g := &Game{
+		auto:     a,
+		pageList: []int{0, 1, 2},
+		stateCh:  make(chan ipc.PresenterState, 1),
+	}
+	g.broadcastState()
+	<-g.stateCh
+
+	// The auto-advance fraction moves every frame but is extrapolated by
+	// the presenter, so it alone must not trigger a resend.
+	time.Sleep(5 * time.Millisecond)
+	g.broadcastState()
+	select {
+	case st := <-g.stateCh:
+		t.Fatalf("unchanged state was resent: %+v", st)
+	default:
+	}
+
+	g.listIdx = 1
+	g.broadcastState()
+	select {
+	case st := <-g.stateCh:
+		if st.ListIndex != 1 {
+			t.Fatalf("ListIndex = %d, want 1", st.ListIndex)
+		}
+	default:
+		t.Fatal("changed state was not sent")
 	}
 }
 
@@ -277,9 +314,6 @@ func TestBroadcastStateIncludesOverviewSnapshot(t *testing.T) {
 
 	g.broadcastState()
 	st := <-g.stateCh
-	if !reflect.DeepEqual(st.PageList, []int{0, 0, 3, 2}) {
-		t.Fatalf("PageList = %v, want reordered playback list with duplicates", st.PageList)
-	}
 	if st.Overview != (ipc.PresenterOverviewState{
 		Active:        true,
 		Phase:         int(ovActive),
@@ -316,12 +350,12 @@ func TestLayoutHelpers(t *testing.T) {
 	if ov.previewPanel.x >= ov.gridPanel.x {
 		t.Fatalf("overview preview should be left of grid: preview=%+v grid=%+v", ov.previewPanel, ov.gridPanel)
 	}
-	gridX, gridY, cols, rows, cellW, cellH, _ := computeOvGrid(12, 1920, 1080)
+	gridX, gridY, cols, cellW, cellH, _ := computeOvGrid(12, 1920, 1080)
 	if gridX != ov.gridContent.x || gridY != ov.gridContent.y {
 		t.Fatalf("grid origin = %d,%d, want %d,%d", gridX, gridY, ov.gridContent.x, ov.gridContent.y)
 	}
-	if cols <= 0 || rows <= 0 || cellW <= 0 || cellH <= 0 {
-		t.Fatalf("invalid grid cols=%d rows=%d cell=%fx%f", cols, rows, cellW, cellH)
+	if cols <= 0 || cellW <= 0 || cellH <= 0 {
+		t.Fatalf("invalid grid cols=%d cell=%fx%f", cols, cellW, cellH)
 	}
 }
 
@@ -355,47 +389,37 @@ func TestOverviewLoadOrderIsBoundedAndPrioritized(t *testing.T) {
 	}
 }
 
-func TestOverviewBackgroundRequestsAllSlidesOverTime(t *testing.T) {
-	const total = 97
-	g := &Game{
-		pageList: make([]int, total),
-		ov: overview{
-			thumbReq:  make(chan int, overviewThumbQueue),
-			thumbStop: make(chan struct{}),
-			thumbsOn:  true,
-			thumbW:    120,
-			thumbH:    90,
-			requested: make([]bool, total),
-		},
+func TestOverviewAttachQueuesEveryPageOnce(t *testing.T) {
+	p := &pipeline{
+		thumbs: newOverviewThumbStore(""),
+		sched:  pdf.NewScheduler(nil, nil),
 	}
-	for i := range g.pageList {
-		g.pageList[i] = i
+	pageList := make([]int, 97)
+	for i := range pageList {
+		pageList[i] = i % 90 // a play list may repeat pages
 	}
+	g := &Game{pageList: pageList, bufW: 1920, bufH: 1080}
+	g.ov = newOverview(pageList, 1920, 1080, 0)
+	g.ov.attach(p)
 
-	g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
-	if got := len(g.ov.thumbReq); got != overviewBackgroundPerFrame {
-		t.Fatalf("first background request queued %d thumbnails, want %d", got, overviewBackgroundPerFrame)
+	if _, _, _, bg := p.sched.QueueLens(); bg != 90 {
+		t.Fatalf("background thumbnail jobs = %d, want one per distinct page (90)", bg)
 	}
-	for len(g.ov.thumbReq) > 0 {
-		<-g.ov.thumbReq
+	if p.onThumb == nil {
+		t.Fatal("attach should route arriving thumbnails to the overview")
 	}
-
-	for range total {
-		g.requestMoreOverviewThumbnails(overviewBackgroundPerFrame)
-		for len(g.ov.thumbReq) > 0 {
-			<-g.ov.thumbReq
-		}
+	g.ov.release(p)
+	if _, _, _, bg := p.sched.QueueLens(); bg != 0 {
+		t.Fatalf("release left %d background jobs queued", bg)
 	}
-	for i, ok := range g.ov.requested {
-		if !ok {
-			t.Fatalf("slide %d was never requested", i)
-		}
+	if p.onThumb != nil || g.ov.phase != ovOff {
+		t.Fatal("release should detach and reset the overview")
 	}
 }
 
 func TestOverviewHoverIndexMatchesCellScan(t *testing.T) {
 	const total = 500
-	gridX, gridY, cols, _, cellW, cellH, padding := computeOvGrid(total, 1920, 1080)
+	gridX, gridY, cols, cellW, cellH, padding := computeOvGrid(total, 1920, 1080)
 	ov := overview{cols: cols, cellW: cellW, cellH: cellH, padding: padding, gridX: gridX, gridY: gridY}
 	ov.buildCells(total)
 
@@ -433,13 +457,17 @@ func TestPresenterModeOverviewDoesNotStartMasterThumbnails(t *testing.T) {
 		listIdx:  1,
 		bufW:     1280,
 		bufH:     720,
+		pipe:     &pipeline{thumbs: newOverviewThumbStore(""), sched: pdf.NewScheduler(nil, nil)},
 	}
 	g.openOverview()
-	if g.ov.thumbsOn {
-		t.Fatal("master overview thumbnails should be disabled when presenter view owns overview drawing")
+	if g.ov.phase != ovEntering {
+		t.Fatalf("overview phase = %v, want entering", g.ov.phase)
 	}
-	if g.ov.thumbReq != nil || g.ov.thumbCh != nil || g.ov.thumbStop != nil {
-		t.Fatal("master overview should not allocate thumbnail worker channels in presenter mode")
+	if g.ov.store != nil || g.pipe.onThumb != nil {
+		t.Fatal("master overview must not load thumbnails when the presenter view draws the overview")
+	}
+	if _, _, _, bg := g.pipe.sched.QueueLens(); bg != 0 {
+		t.Fatalf("master queued %d thumbnail jobs in presenter mode", bg)
 	}
 }
 
@@ -517,5 +545,59 @@ func TestTransitionAndElapsedHelpers(t *testing.T) {
 	}
 	if got := sign(-42); got != -1 {
 		t.Fatalf("sign(-42) = %d, want -1", got)
+	}
+}
+
+func TestWrapPresenterLinesIsRuneAware(t *testing.T) {
+	got := wrapPresenterLines("Größe ändern\n\nÜberlänge-ohne-Leerzeichen", 6)
+	want := []string{"Größe", "ändern", "", "Überlä", "nge-oh", "ne-Lee", "rzeich", "en"}
+	if len(got) != len(want) {
+		t.Fatalf("wrap = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("wrap = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestDebugFontTextFoldsTypography(t *testing.T) {
+	in := "Größe \u2013 \u201cquoted\u201d \u2026 \u2022 5\u20ac \u4e2d"
+	if got, want := debugFontText(in), `Größe - "quoted" ... * 5EUR ?`; got != want {
+		t.Fatalf("debugFontText = %q, want %q", got, want)
+	}
+	if s := "plain Ä text"; debugFontText(s) != s {
+		t.Fatal("Latin-1 text should pass through unchanged")
+	}
+}
+
+func TestRedrawGate(t *testing.T) {
+	var g redrawGate[int]
+	now := time.Now()
+	if !g.needed(1, now) {
+		t.Fatal("first frame must draw")
+	}
+	if g.needed(1, now.Add(10*time.Millisecond)) {
+		t.Fatal("unchanged frame should be skipped")
+	}
+	if !g.needed(2, now.Add(20*time.Millisecond)) {
+		t.Fatal("changed frame must draw")
+	}
+	if !g.needed(2, now.Add(2*time.Second)) {
+		t.Fatal("a redraw is forced at least once per second")
+	}
+}
+
+func TestPresenterArgsForwardTuningFlags(t *testing.T) {
+	cfg := config.Config{PDFPath: "deck.pdf", PresenterMonitor: 1, NoFullscreen: true, CacheMB: 64, RenderScale: 0.75, DebugStats: true}
+	got := presenterArgs(cfg, "/tmp/x.sock")
+	want := []string{"--monitor", "1", "--_presenter-socket", "/tmp/x.sock", "--no-fullscreen", "--cache-mb", "64", "--render-scale", "0.75", "--debug-stats", "deck.pdf"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %q, want %q", got, want)
+		}
 	}
 }

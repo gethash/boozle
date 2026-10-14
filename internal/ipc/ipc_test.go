@@ -1,7 +1,6 @@
 package ipc
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,31 +8,26 @@ import (
 	"time"
 )
 
-func TestPresenterStateAndCommandRoundTrip(t *testing.T) {
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("boozle-ipc-test-%d.sock", time.Now().UnixNano()))
-	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	srv, err := Listen(socketPath)
+func TestHelloStateAndCommandRoundTrip(t *testing.T) {
+	hello := Hello{
+		PageList:  []int{0, 4, 5, 8},
+		Notes:     map[int]string{5: "Größe – “quoted”"},
+		StartedAt: time.Now().Add(-time.Minute).Round(time.Millisecond),
+	}
+	srv, err := Listen(hello)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	defer srv.Close()
-	go srv.AcceptLoop()
 
-	disconnected := make(chan struct{})
-	recv, err := Connect(socketPath, func() { close(disconnected) })
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
+	// State sent before the presenter connects must be replayed on connect.
 	wantState := PresenterState{
 		Page:           4,
-		ListIndex:      2,
-		PageList:       []int{0, 4, 5, 8},
-		Total:          9,
-		Fraction:       0.75,
-		Paused:         true,
+		ListIndex:      1,
 		NextPage:       5,
-		ElapsedSeconds: 123,
+		Paused:         true,
+		Fraction:       0.75,
+		FractionPerSec: 0.1,
 		Overview: PresenterOverviewState{
 			Active:        true,
 			Phase:         2,
@@ -43,24 +37,35 @@ func TestPresenterStateAndCommandRoundTrip(t *testing.T) {
 			ExitToIndex:   3,
 		},
 	}
+	srv.Send(wantState)
+	go srv.Accept()
 
-	deadline := time.Now().Add(time.Second)
+	disconnected := make(chan struct{})
+	recv, err := Connect(srv.Path(), func() { close(disconnected) })
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
 	for {
-		srv.Send(wantState)
-		got := recv.Latest()
-		if reflect.DeepEqual(got, wantState) {
+		gotHello, ok := recv.Hello()
+		gotState, _, _ := recv.Latest()
+		if ok && reflect.DeepEqual(gotState, wantState) {
+			if !reflect.DeepEqual(gotHello.PageList, hello.PageList) ||
+				!reflect.DeepEqual(gotHello.Notes, hello.Notes) ||
+				!gotHello.StartedAt.Equal(hello.StartedAt) {
+				t.Fatalf("hello = %+v, want %+v", gotHello, hello)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("receiver latest = %+v, want %+v", got, wantState)
+			t.Fatalf("receiver hello=%v state=%+v, want %+v", ok, gotState, wantState)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	wantCmd := PresenterCommand{Name: "digit", Arg: 7}
-	if ok := recv.SendCommand(wantCmd); !ok {
-		t.Fatal("SendCommand returned false")
-	}
+	recv.SendCommand(wantCmd)
 	select {
 	case got := <-srv.Commands():
 		if got != wantCmd {
@@ -70,10 +75,33 @@ func TestPresenterStateAndCommandRoundTrip(t *testing.T) {
 		t.Fatal("timed out waiting for command")
 	}
 
+	dir := filepath.Dir(srv.Path())
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("socket dir perms = %v (%v), want 0700", st.Mode().Perm(), err)
+	}
+
 	_ = srv.Close()
 	select {
 	case <-disconnected:
 	case <-time.After(time.Second):
 		t.Fatal("receiver did not observe disconnect")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("socket dir should be removed on Close, stat err = %v", err)
+	}
+}
+
+func TestFractionAtExtrapolatesAndClamps(t *testing.T) {
+	st := PresenterState{Fraction: 0.5, FractionPerSec: 0.25}
+	recv := time.Now()
+	if got := st.FractionAt(recv, recv.Add(time.Second)); got != 0.75 {
+		t.Fatalf("FractionAt(+1s) = %v, want 0.75", got)
+	}
+	if got := st.FractionAt(recv, recv.Add(10*time.Second)); got != 1 {
+		t.Fatalf("FractionAt(+10s) = %v, want clamp to 1", got)
+	}
+	paused := PresenterState{Fraction: 0.3}
+	if got := paused.FractionAt(recv, recv.Add(time.Hour)); got != 0.3 {
+		t.Fatalf("paused FractionAt = %v, want 0.3", got)
 	}
 }

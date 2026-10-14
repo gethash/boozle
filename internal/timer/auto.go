@@ -58,6 +58,16 @@ func (a *Auto) Fraction() float64 {
 	return 1 - float64(remaining)/float64(a.currentDur)
 }
 
+// Rate returns how fast Fraction grows, in fractions per second. It is 0
+// when auto-advance is inactive or paused, so a remote view can extrapolate
+// Fraction without polling.
+func (a *Auto) Rate() float64 {
+	if !a.IsActive() || a.paused || a.currentDur <= 0 {
+		return 0
+	}
+	return 1 / a.currentDur.Seconds()
+}
+
 // ShouldAdvance returns true once per scheduled interval. The caller is
 // responsible for calling Reset(newPage) after acting on a true result.
 func (a *Auto) ShouldAdvance() bool {

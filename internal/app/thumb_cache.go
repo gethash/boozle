@@ -46,6 +46,24 @@ func (s *overviewThumbStore) Get(key pdf.CacheKey) (*ebiten.Image, bool) {
 	return img.(*ebiten.Image), true
 }
 
+func (s *overviewThumbStore) Len() int {
+	if s == nil || s.gpu == nil {
+		return 0
+	}
+	return s.gpu.Len()
+}
+
+func (s *overviewThumbStore) Bytes() int {
+	if s == nil || s.gpu == nil {
+		return 0
+	}
+	return s.gpu.Bytes()
+}
+
+func (s *overviewThumbStore) Has(key pdf.CacheKey) bool {
+	return s != nil && s.gpu != nil && s.gpu.Has(key)
+}
+
 func (s *overviewThumbStore) Put(key pdf.CacheKey, img *ebiten.Image) {
 	if s != nil && s.gpu != nil && img != nil {
 		s.gpu.Put(key, img)
@@ -137,7 +155,8 @@ func (c *overviewDiskThumbCache) Save(key pdf.CacheKey, img image.Image) {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if err := png.Encode(tmp, img); err != nil {
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(tmp, img); err != nil {
 		_ = tmp.Close()
 		return
 	}

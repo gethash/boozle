@@ -7,19 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`--debug-stats`** (hidden): prints GPU/heap usage, cache occupancy, render queue lengths and render timings to stderr every two seconds, for both windows.
 - **`examples/sample.pdf`**: a small generated deck for local dev runs. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
 
 ### Changed
 
 - **Overview thumbnails are cached across sessions and launches**: slide overview now uses a dedicated thumbnail cache with a 128 MB in-process GPU LRU plus a transparent OS-temp PNG cache keyed by PDF path, file size, modtime, page, and thumbnail dimensions. Opening overview again in the same run should be immediate, and reopening the same unchanged deck can reuse thumbnails from temp without re-rendering them through PDFium.
-- **Overview thumbnail loading is main-thread safe**: background workers now emit CPU RGBA images only; Ebiten GPU uploads happen on the main goroutine before insertion into the thumbnail cache. Audience and presenter overview share this pipeline instead of maintaining duplicate render/upload code.
 - **Large-deck overview drawing does less per frame**: overview precomputes grid cell rectangles, uses O(1) mouse hit testing instead of scanning every slide, caches the static thumbnail grid layer while active, and switches large decks to a simpler grid fade instead of animating every tile independently.
-- **PDF page sizes are cached lazily**: repeated current/next/prefetch layout checks now reuse page dimensions after the first `PageSize` lookup instead of calling PDFium every frame.
+- **PDF page sizes are read once at open**: `PageSize` no longer touches PDFium (or waits behind a render) after the document is opened.
+- **Near-instant startup**: the compiled PDFium WebAssembly module is cached in the user cache directory (`<user cache>/boozle/wazero`, override with `BOOZLE_CACHE_DIR`). Opening a PDF drops from about a second to a few tens of milliseconds after the first run — for both the audience and the presenter process.
+- **One render scheduler per window**: all PDFium work runs on a single prioritised worker — the visible slide first, then the presenter's next pane and overview preview, then prefetch, then background thumbnails. A newer "current slide" request replaces an older one, so holding an arrow key coalesces into one render, and stale prefetch work is cancelled instead of rendered.
+- **Navigation never renders on the UI thread**: on a cache miss the previous slide (or a scaled render of the new one) stays up until the exact render lands, and the transition starts only once the new slide is on screen.
+- **Presenter view prefetches for real**: it now renders the next slide at current-pane size and the slide after next at next-pane size ahead of time; on advance the old next-pane image stands in, so advancing no longer costs two synchronous renders in the presenter.
+- **Leaner presenter IPC**: the play list, notes and start time are sent once on connect; afterwards only changed state is sent (the presenter extrapolates the clock and auto-advance progress locally), instead of a full JSON snapshot every frame. The socket now lives in a private `0700` temp directory and accepts exactly one connection.
+- **Idle frames are skipped**: both windows keep the last frame when nothing changed, so a static slide costs next to no GPU time.
+- **One overview implementation**: audience and presenter windows share the same overview code. The preview pane renders the selected slide at full preview resolution (after a short debounce) instead of upscaling the thumbnail, and newly arrived thumbnails redraw only their own tile.
+- **Fade transition is a true crossfade**: the outgoing slide stays opaque underneath, so the background no longer shows through mid-fade.
+- **Speaker notes wrap by character, not byte**, and typographic characters outside the debug font (curly quotes, dashes, ellipses, bullets, €) are mapped to ASCII instead of disappearing.
 
 ### Fixed
 
 - **PDFium heap race**: rendered bitmaps were freed inside the PDFium WebAssembly module from the main thread while the prefetcher or thumbnail loader could be rendering on the same instance. `RenderPage` now copies pixels into a pooled Go buffer and frees the PDFium bitmap before releasing the document lock, so WASM memory is only touched under the lock and holds at most one bitmap at a time.
 - **Windows could not open PDFs**: go-pdfium rejects drive-letter paths inside WebAssembly. The PDF's directory is now mounted read-only at `/doc` in the sandbox (instead of the whole filesystem) and opened by a POSIX path.
+- **`--no-fullscreen` with presenter view**: the presenter window now honours it too, so `--no-fullscreen --monitor 0 --presenter-monitor 0` really opens two windows for one-monitor testing.
 - **Presenter overview duplicate work**: in presenter mode, the audience/master process no longer starts a thumbnail loader for overview content it does not draw; the presenter process owns the overview thumbnails it displays.
 
 ## [1.2.0] — 2026-05-05

@@ -1,29 +1,53 @@
 // Package ipc provides the local-socket channel between the main presentation
 // window (master) and the presenter-view subprocess (slave).
+//
+// The protocol is newline-delimited JSON. On connect the master sends one
+// Hello with everything that never changes during a run (play list, notes,
+// start time), followed by the current PresenterState. After that, states
+// are only sent when something visible changes; the presenter extrapolates
+// clocks and auto-advance progress locally.
 package ipc
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
-// PresenterState is the snapshot the master sends to the slave each frame.
+// Hello carries the static presentation data, sent once per connection.
+type Hello struct {
+	PageList  []int          `json:"page_list"`  // 0-indexed page numbers in playback order
+	Notes     map[int]string `json:"notes"`      // keyed by 1-indexed page, as in sidecars
+	StartedAt time.Time      `json:"started_at"` // presentation start (for the elapsed clock)
+	Loop      bool           `json:"loop"`       // --loop: navigation wraps around
+}
+
+// PresenterState is the dynamic part of the presentation.
 type PresenterState struct {
-	Page           int     // 0-indexed current page
-	ListIndex      int     // 0-indexed position within the active play list
-	PageList       []int   // 0-indexed page numbers in playback order
-	Total          int     // total pages in play list
-	Fraction       float64 // auto-advance progress 0..1 (0 when no auto-advance)
-	Paused         bool
-	NextPage       int   // 0-indexed next page, or -1 if on the last page
-	ElapsedSeconds int64 // wall-clock seconds since presentation start
-	Notes          string
-	Overview       PresenterOverviewState
+	Page      int  `json:"page"`       // 0-indexed current page
+	ListIndex int  `json:"list_index"` // position within Hello.PageList
+	NextPage  int  `json:"next_page"`  // 0-indexed next page, or -1 on the last page
+	Paused    bool `json:"paused"`
+
+	// Auto-advance progress at send time and its rate of change, so the
+	// presenter can animate the bar without a message per frame.
+	Fraction       float64 `json:"fraction"`
+	FractionPerSec float64 `json:"fraction_per_sec"`
+
+	Overview PresenterOverviewState `json:"overview"`
+}
+
+// FractionAt extrapolates the auto-advance fraction to now, given the time
+// the state was received.
+func (s PresenterState) FractionAt(received, now time.Time) float64 {
+	f := s.Fraction + now.Sub(received).Seconds()*s.FractionPerSec
+	return min(1, max(0, f))
 }
 
 // PresenterOverviewState mirrors the master's overview session so the
@@ -44,95 +68,124 @@ type PresenterCommand struct {
 	Arg  int    `json:"arg,omitempty"`
 }
 
-// SocketPath returns the per-process socket path.
-func SocketPath(masterPID int) string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("boozle-presenter-%d.sock", masterPID))
+// message is the wire envelope; exactly one field is set.
+type message struct {
+	Hello *Hello          `json:"hello,omitempty"`
+	State *PresenterState `json:"state,omitempty"`
 }
 
 // ─── Master side ─────────────────────────────────────────────────────────────
 
-// Server is the master-side IPC endpoint. It accepts exactly one slave
-// connection at a time and forwards PresenterState to it.
+// Server is the master-side IPC endpoint. It accepts exactly one presenter
+// connection on a socket inside a private (0700) temporary directory.
 type Server struct {
 	ln   net.Listener
+	dir  string
 	path string
 
-	mu       sync.Mutex
-	conn     net.Conn
-	commands chan PresenterCommand
+	mu        sync.Mutex
+	conn      net.Conn
+	hello     Hello
+	lastState *PresenterState
+	commands  chan PresenterCommand
 }
 
-// Listen creates the local socket and returns a ready Server.
-// Any stale socket from a prior crash is removed first.
-func Listen(socketPath string) (*Server, error) {
-	_ = os.Remove(socketPath) // tolerate ENOENT
-	ln, err := net.Listen("unix", socketPath)
+// Listen creates a socket in a fresh private directory and returns a ready
+// Server. hello is sent to the presenter as soon as it connects.
+func Listen(hello Hello) (*Server, error) {
+	dir, err := os.MkdirTemp("", "boozle-")
 	if err != nil {
-		return nil, fmt.Errorf("ipc listen %s: %w", socketPath, err)
+		return nil, fmt.Errorf("ipc: %w", err)
 	}
-	return &Server{ln: ln, path: socketPath, commands: make(chan PresenterCommand, 64)}, nil
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("ipc: %w", err)
+	}
+	path := filepath.Join(dir, "presenter.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("ipc listen %s: %w", path, err)
+	}
+	return &Server{ln: ln, dir: dir, path: path, hello: hello, commands: make(chan PresenterCommand, 64)}, nil
 }
 
-// AcceptLoop blocks accepting connections. Run it in a goroutine.
-// Each new connection replaces the previous one (only one slave at a time).
-func (s *Server) AcceptLoop() {
-	for {
-		conn, err := s.ln.Accept()
-		if err != nil {
-			return // listener was closed
-		}
-		s.mu.Lock()
-		if s.conn != nil {
-			_ = s.conn.Close()
-		}
-		s.conn = conn
-		s.mu.Unlock()
-		go s.readCommands(conn)
+// Path returns the socket path to hand to the presenter process.
+func (s *Server) Path() string { return s.path }
+
+// Accept waits for the presenter to connect, sends it Hello and the latest
+// state, and stops listening. Run it in a goroutine.
+func (s *Server) Accept() {
+	conn, err := s.ln.Accept()
+	_ = s.ln.Close() // one presenter per run
+	if err != nil {
+		return
 	}
+	s.mu.Lock()
+	s.conn = conn
+	hello := s.hello
+	last := s.lastState
+	s.mu.Unlock()
+
+	s.write(conn, message{Hello: &hello})
+	if last != nil {
+		s.write(conn, message{State: last})
+	}
+	go s.readCommands(conn)
 }
 
 // Commands returns the stream of keyboard commands sent by the presenter
-// window. The channel is intentionally buffered; if the master falls behind,
-// the newest state frame will still catch up on the next update.
+// window. The channel is buffered; bursts beyond its capacity are dropped.
 func (s *Server) Commands() <-chan PresenterCommand {
 	return s.commands
 }
 
-// Send encodes st as a JSON line and writes it to the connected slave.
-// Silently drops the message if no slave is connected or the write fails.
+// Send writes st to the presenter (or keeps it for when it connects).
 func (s *Server) Send(st PresenterState) {
 	s.mu.Lock()
+	s.lastState = &st
 	conn := s.conn
 	s.mu.Unlock()
-	if conn == nil {
-		return
+	if conn != nil {
+		s.write(conn, message{State: &st})
 	}
-	line, err := json.Marshal(st)
+}
+
+func (s *Server) write(conn net.Conn, m message) {
+	line, err := json.Marshal(m)
 	if err != nil {
 		return
 	}
 	line = append(line, '\n')
 	if _, err := conn.Write(line); err != nil {
-		s.mu.Lock()
-		if s.conn == conn {
-			_ = s.conn.Close()
-			s.conn = nil
-		}
-		s.mu.Unlock()
+		s.dropConn(conn)
 	}
 }
 
-// Close shuts down the listener and removes the socket file.
+func (s *Server) dropConn(conn net.Conn) {
+	s.mu.Lock()
+	if s.conn == conn {
+		_ = s.conn.Close()
+		s.conn = nil
+	}
+	s.mu.Unlock()
+}
+
+// Close shuts down the listener and connection and removes the socket
+// directory.
 func (s *Server) Close() error {
 	err := s.ln.Close()
-	_ = os.Remove(s.path)
 	s.mu.Lock()
 	if s.conn != nil {
 		_ = s.conn.Close()
 		s.conn = nil
 	}
 	s.mu.Unlock()
-	return err
+	_ = os.RemoveAll(s.dir)
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) readCommands(conn net.Conn) {
@@ -148,22 +201,21 @@ func (s *Server) readCommands(conn net.Conn) {
 			// Drop stale input bursts rather than blocking the IPC reader.
 		}
 	}
-	s.mu.Lock()
-	if s.conn == conn {
-		_ = s.conn.Close()
-		s.conn = nil
-	}
-	s.mu.Unlock()
+	s.dropConn(conn)
 }
 
 // ─── Slave side ──────────────────────────────────────────────────────────────
 
-// Receiver is the slave-side IPC endpoint. It keeps the latest PresenterState
-// received from the master in a mutex-protected field.
+// Receiver is the slave-side IPC endpoint. It keeps the Hello and the latest
+// PresenterState received from the master.
 type Receiver struct {
-	mu    sync.Mutex
-	state PresenterState
-	conn  net.Conn
+	mu       sync.Mutex
+	hello    Hello
+	hasHello bool
+	state    PresenterState
+	received time.Time
+	seq      uint64
+	conn     net.Conn
 }
 
 // Connect dials the master socket and starts a background read loop.
@@ -178,35 +230,51 @@ func Connect(socketPath string, onDisconnect func()) (*Receiver, error) {
 	return r, nil
 }
 
-// Latest returns a copy of the most recently received state.
-func (r *Receiver) Latest() PresenterState {
+// Hello returns the static presentation data, and false until it arrived.
+func (r *Receiver) Hello() (Hello, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state
+	return r.hello, r.hasHello
+}
+
+// Latest returns the most recent state, when it was received, and a sequence
+// number that increments with every message (cheap change detection).
+func (r *Receiver) Latest() (PresenterState, time.Time, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state, r.received, r.seq
 }
 
 // SendCommand forwards a keyboard command from the presenter window to the
-// master. It returns false when the socket write fails.
-func (r *Receiver) SendCommand(cmd PresenterCommand) bool {
+// master. Write errors are ignored: a dead master ends the read loop, which
+// shuts the presenter down.
+func (r *Receiver) SendCommand(cmd PresenterCommand) {
 	line, err := json.Marshal(cmd)
 	if err != nil {
-		return false
+		return
 	}
-	line = append(line, '\n')
-	_, err = r.conn.Write(line)
-	return err == nil
+	_, _ = r.conn.Write(append(line, '\n'))
 }
 
 func (r *Receiver) readLoop(conn net.Conn, onDisconnect func()) {
 	defer conn.Close()
 	sc := bufio.NewScanner(conn)
+	sc.Buffer(make([]byte, 0, 64<<10), 16<<20) // Hello carries all notes
 	for sc.Scan() {
-		var st PresenterState
-		if err := json.Unmarshal(sc.Bytes(), &st); err != nil {
+		var m message
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
 			continue // skip malformed lines
 		}
 		r.mu.Lock()
-		r.state = st
+		if m.Hello != nil {
+			r.hello = *m.Hello
+			r.hasHello = true
+		}
+		if m.State != nil {
+			r.state = *m.State
+			r.received = time.Now()
+		}
+		r.seq++
 		r.mu.Unlock()
 	}
 	onDisconnect()

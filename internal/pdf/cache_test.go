@@ -262,17 +262,3 @@ func TestCachePurgeNotMatching(t *testing.T) {
 		t.Errorf("Purge Deallocate count = %d, want 1", got)
 	}
 }
-
-func TestPrefetchRequestDeduplicatesPendingKeys(t *testing.T) {
-	c := NewCache(32)
-	p := NewPrefetcher(nil, c, 4)
-	k := keyAt(1, 100, 100)
-
-	p.Request(k)
-	p.Request(k)
-	p.Request(k)
-
-	if got := p.PendingLen(); got != 1 {
-		t.Fatalf("PendingLen = %d, want 1", got)
-	}
-}

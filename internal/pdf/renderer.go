@@ -24,6 +24,8 @@ import (
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/webassembly"
 	"github.com/tetratelabs/wazero"
+
+	"github.com/gethash/boozle/internal/cachedir"
 )
 
 // docMount is where the PDF's directory is mounted inside the WASM sandbox.
@@ -39,26 +41,39 @@ type Doc struct {
 	pool     pdfium.Pool
 	instance pdfium.Pdfium
 	docRef   references.FPDF_DOCUMENT
-	pages    int
 	closed   bool
 
+	// pageSizes is filled once in Open and immutable afterwards, so
+	// PageSize never waits behind a render holding mu.
 	pageSizes []Page
-	sizeKnown []bool
 }
 
 // Page is the natural size of a PDF page, in PDF points (72 dpi).
 type Page struct {
-	Index        int     // 0-indexed
 	WidthPoints  float64 // page width in points
 	HeightPoints float64 // page height in points
 }
 
-// AspectRatio returns width/height; safe even for zero-height pages.
-func (p Page) AspectRatio() float64 {
-	if p.HeightPoints <= 0 {
-		return 1
-	}
-	return p.WidthPoints / p.HeightPoints
+var (
+	compileCacheOnce sync.Once
+	compileCache     wazero.CompilationCache
+)
+
+// runtimeConfig returns a wazero config whose compilation cache persists the
+// compiled PDFium module on disk. Compiling the ~5 MB module takes about a
+// second per process; with a warm cache Open is near-instant. The cache is
+// shared by every Doc in the process (tests, master + presenter reuse it).
+func runtimeConfig() wazero.RuntimeConfig {
+	compileCacheOnce.Do(func() {
+		if dir, err := cachedir.Dir("wazero"); err == nil {
+			if cc, err := wazero.NewCompilationCacheWithDir(dir); err == nil {
+				compileCache = cc
+				return
+			}
+		}
+		compileCache = wazero.NewCompilationCache()
+	})
+	return wazero.NewRuntimeConfig().WithCompilationCache(compileCache)
 }
 
 // Open initializes a PDFium WASM worker pool, loads the file at path,
@@ -70,10 +85,11 @@ func Open(path string) (*Doc, error) {
 	}
 
 	pool, err := webassembly.Init(webassembly.Config{
-		MinIdle:  1,
-		MaxIdle:  1,
-		MaxTotal: 1,
-		FSConfig: wazero.NewFSConfig().WithReadOnlyDirMount(filepath.Dir(absPath), docMount),
+		MinIdle:       1,
+		MaxIdle:       1,
+		MaxTotal:      1,
+		FSConfig:      wazero.NewFSConfig().WithReadOnlyDirMount(filepath.Dir(absPath), docMount),
+		RuntimeConfig: runtimeConfig(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pdfium init: %w", err)
@@ -93,57 +109,50 @@ func Open(path string) (*Doc, error) {
 		return nil, fmt.Errorf("open document: %w", err)
 	}
 
-	cnt, err := instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{Document: open.Document})
-	if err != nil {
+	fail := func(err error) (*Doc, error) {
 		_, _ = instance.FPDF_CloseDocument(&requests.FPDF_CloseDocument{Document: open.Document})
 		_ = instance.Close()
 		_ = pool.Close()
-		return nil, fmt.Errorf("get page count: %w", err)
+		return nil, err
+	}
+
+	cnt, err := instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{Document: open.Document})
+	if err != nil {
+		return fail(fmt.Errorf("get page count: %w", err))
+	}
+
+	// FPDF_GetPageSizeByIndex reads the page dictionary without loading the
+	// page, so sizing even large decks up front is cheap.
+	sizes := make([]Page, cnt.PageCount)
+	for i := range sizes {
+		resp, err := instance.FPDF_GetPageSizeByIndex(&requests.FPDF_GetPageSizeByIndex{
+			Document: open.Document,
+			Index:    i,
+		})
+		if err != nil {
+			return fail(fmt.Errorf("page %d size: %w", i, err))
+		}
+		sizes[i] = Page{WidthPoints: resp.Width, HeightPoints: resp.Height}
 	}
 
 	return &Doc{
 		pool:      pool,
 		instance:  instance,
 		docRef:    open.Document,
-		pages:     cnt.PageCount,
-		pageSizes: make([]Page, cnt.PageCount),
-		sizeKnown: make([]bool, cnt.PageCount),
+		pageSizes: sizes,
 	}, nil
 }
 
 // PageCount returns the total number of pages.
-func (d *Doc) PageCount() int { return d.pages }
+func (d *Doc) PageCount() int { return len(d.pageSizes) }
 
-// PageSize returns the natural width/height (in PDF points) of page idx (0-indexed).
+// PageSize returns the natural width/height (in PDF points) of page idx
+// (0-indexed). It never touches PDFium and is safe from any goroutine.
 func (d *Doc) PageSize(idx int) (Page, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closed {
-		return Page{}, errors.New("doc is closed")
-	}
-	if idx < 0 || idx >= d.pages {
+	if idx < 0 || idx >= len(d.pageSizes) {
 		return Page{}, fmt.Errorf("page %d out of range", idx)
 	}
-	if idx < len(d.sizeKnown) && d.sizeKnown[idx] {
-		return d.pageSizes[idx], nil
-	}
-	resp, err := d.instance.FPDF_GetPageSizeByIndex(&requests.FPDF_GetPageSizeByIndex{
-		Document: d.docRef,
-		Index:    idx,
-	})
-	if err != nil {
-		return Page{}, fmt.Errorf("page %d size: %w", idx, err)
-	}
-	page := Page{
-		Index:        idx,
-		WidthPoints:  resp.Width,
-		HeightPoints: resp.Height,
-	}
-	if idx < len(d.pageSizes) {
-		d.pageSizes[idx] = page
-		d.sizeKnown[idx] = true
-	}
-	return page, nil
+	return d.pageSizes[idx], nil
 }
 
 // RenderPage rasterizes page idx (0-indexed) to fit inside width × height

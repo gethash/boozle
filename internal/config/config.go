@@ -32,6 +32,7 @@ type Flags struct {
 	PresenterMonitor int     // -1 = disabled
 	CacheMB          int     // 0 = auto-size to display
 	RenderScale      float64 // 0 = native; 0.5..1.0 reduces per-page pixel count
+	DebugStats       bool    // print memory/render diagnostics to stderr
 }
 
 // Config is the resolved configuration the app actually runs with.
@@ -59,6 +60,7 @@ type Config struct {
 	PresenterMonitor int     // -1 = disabled; monitor index for the presenter view window
 	CacheMB          int     // 0 = auto-size to display; otherwise hard cap in MB
 	RenderScale      float64 // 0 = native; 0.5..1.0 fraction of native pixels for renders
+	DebugStats       bool    // print memory/render diagnostics to stderr
 }
 
 // Color is an RGBA color parsed from a hex string.
@@ -106,6 +108,7 @@ func Load(f Flags) (Config, error) {
 		PresenterMonitor: f.PresenterMonitor,
 		CacheMB:          f.CacheMB,
 		RenderScale:      f.RenderScale,
+		DebugStats:       f.DebugStats,
 		PerPage:          map[int]time.Duration{},
 		Notes:            map[int]string{},
 	}

@@ -30,7 +30,7 @@ var (
 type PresenterOptions struct {
 	SocketPath  string
 	PDFPath     string
-	Monitor     int
+	Monitor     string  // index or name
 	Windowed    bool    // --no-fullscreen: open as a normal window
 	CacheMB     int     // 0 = auto
 	RenderScale float64 // 0 = native
@@ -42,6 +42,7 @@ type PresenterOptions struct {
 type PresenterGame struct {
 	pipe     *pipeline
 	receiver *ipc.Receiver
+	place    *monitorPlacer
 	hello    ipc.Hello
 	hasHello bool
 	opts     PresenterOptions
@@ -134,22 +135,28 @@ func RunPresenter(opts PresenterOptions) error {
 	setWindowIcon()
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetScreenClearedEveryFrame(false)
-	if err := display.PickMonitor(opts.Monitor); err != nil {
+	monitor, err := display.Resolve(opts.Monitor)
+	if err != nil {
+		return fmt.Errorf("presenter --monitor: %w", err)
+	}
+	if err := display.PrepareWindow(monitor, 1280, 800); err != nil {
 		return err
 	}
-	ebiten.SetWindowSize(1280, 800)
-
-	var runGame ebiten.Game = g
 	if !opts.Windowed {
-		runGame = &fullscreenOnMonitor{game: g, monitorIdx: opts.Monitor}
+		g.place = newMonitorPlacer(monitor)
+		g.place.debug = opts.DebugStats
+		g.place.start()
 	}
-	if err := ebiten.RunGame(runGame); err != nil && !errors.Is(err, ErrQuit) {
+
+	err = ebiten.RunGameWithOptions(g, &ebiten.RunGameOptions{X11ClassName: "boozle", X11InstanceName: "presenter"})
+	if err != nil && !errors.Is(err, ErrQuit) {
 		return err
 	}
 	return nil
 }
 
 func (g *PresenterGame) Update() error {
+	g.place.tick(ebitenWindow{})
 	g.pipe.drain()
 	if !g.hasHello {
 		g.hello, g.hasHello = g.receiver.Hello()

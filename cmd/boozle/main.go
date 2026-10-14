@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/gethash/boozle/internal/app"
 	"github.com/gethash/boozle/internal/config"
@@ -44,7 +45,7 @@ func newRootCmd() *cobra.Command {
 		auto             time.Duration
 		loop             bool
 		startPage        int
-		monitorIdx       int
+		monitor          string
 		pages            string
 		bg               string
 		noFullscreen     bool
@@ -52,7 +53,7 @@ func newRootCmd() *cobra.Command {
 		progress         bool
 		autoQuit         bool
 		transition       string
-		presenterMonitor int
+		presenterMonitor string
 		presenterSocket  string // hidden internal flag for the slave subprocess
 		debugStats       bool   // hidden: periodic memory/render diagnostics
 		listMonitors     bool
@@ -128,7 +129,7 @@ Sidecars:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listMonitors {
 				fmt.Fprintln(cmd.OutOrStdout(), "Available monitors:")
-				return display.PrintMonitors()
+				return display.PrintMonitors(cmd.OutOrStdout())
 			}
 
 			if len(args) == 0 {
@@ -148,7 +149,7 @@ Sidecars:
 				return app.RunPresenter(app.PresenterOptions{
 					SocketPath:  presenterSocket,
 					PDFPath:     pdfPath,
-					Monitor:     monitorIdx,
+					Monitor:     monitor,
 					Windowed:    noFullscreen,
 					CacheMB:     cacheMB,
 					RenderScale: renderScale,
@@ -161,7 +162,8 @@ Sidecars:
 				Auto:             auto,
 				Loop:             loop,
 				StartPage:        startPage,
-				MonitorIdx:       monitorIdx,
+				Changed:          changedFlags(cmd),
+				Monitor:          monitor,
 				Pages:            pages,
 				Background:       bg,
 				NoFullscreen:     noFullscreen,
@@ -187,7 +189,7 @@ Sidecars:
 	cmd.Flags().DurationVarP(&auto, "auto", "a", 0, "advance every duration (e.g. 30s, 1m30s); 0 disables")
 	cmd.Flags().BoolVarP(&loop, "loop", "l", false, "loop back to first page after last")
 	cmd.Flags().IntVarP(&startPage, "start", "s", 1, "start at page N (1-indexed)")
-	cmd.Flags().IntVarP(&monitorIdx, "monitor", "m", 0, "monitor index (0 = primary)")
+	cmd.Flags().StringVarP(&monitor, "monitor", "m", "0", "monitor index or name (0 = primary; see --list-monitors)")
 	cmd.Flags().StringVar(&pages, "pages", "", `restrict to a page range, e.g. "3-7,10"`)
 	cmd.Flags().StringVar(&bg, "bg", "#000000", "background color hex")
 	cmd.Flags().BoolVar(&noFullscreen, "no-fullscreen", false, "windowed mode (debugging)")
@@ -195,7 +197,7 @@ Sidecars:
 	cmd.Flags().BoolVar(&progress, "progress", false, "show page-position and auto-advance progress overlay")
 	cmd.Flags().BoolVar(&autoQuit, "autoquit", false, "quit after the last page instead of stopping")
 	cmd.Flags().StringVar(&transition, "transition", "", "slide transition style: slide, fade, none (default slide)")
-	cmd.Flags().IntVarP(&presenterMonitor, "presenter-monitor", "P", -1, "monitor index for presenter view (-1 = disabled)")
+	cmd.Flags().StringVarP(&presenterMonitor, "presenter-monitor", "P", "", "monitor index or name for the presenter view (empty or -1 = disabled)")
 	cmd.Flags().BoolVarP(&listMonitors, "list-monitors", "M", false, "list available monitors and exit")
 	cmd.Flags().IntVar(&cacheMB, "cache-mb", 0, "GPU page cache cap in MB (0 = auto-size to display)")
 	cmd.Flags().Float64Var(&renderScale, "render-scale", 0, "render at fraction of native pixels (0.5..1.0; 0 = native)")
@@ -205,6 +207,14 @@ Sidecars:
 	_ = cmd.Flags().MarkHidden("debug-stats")
 
 	return cmd
+}
+
+// changedFlags returns the long names of flags set explicitly on the
+// command line; only those override sidecar values.
+func changedFlags(cmd *cobra.Command) map[string]bool {
+	changed := map[string]bool{}
+	cmd.Flags().Visit(func(f *pflag.Flag) { changed[f.Name] = true })
+	return changed
 }
 
 func newNotesCmd() *cobra.Command {

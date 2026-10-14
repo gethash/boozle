@@ -96,9 +96,9 @@ auto = "2m"
 		t.Fatal(err)
 	}
 
-	// Flags carry cobra defaults (StartPage=1, MonitorIdx=0); sidecar fills
-	// the rest because no explicit flags override.
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, Background: "#000000", PresenterMonitor: -1})
+	// Flags carry cobra defaults (StartPage=1, bg=#000000); the sidecar
+	// fills everything because no flag was passed explicitly.
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, Background: "#000000"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -111,8 +111,8 @@ auto = "2m"
 	if c.StartPage != 4 {
 		t.Errorf("StartPage = %d, want 4", c.StartPage)
 	}
-	if c.MonitorIdx != 1 {
-		t.Errorf("MonitorIdx = %d, want 1", c.MonitorIdx)
+	if c.Monitor != "1" {
+		t.Errorf("Monitor = %q, want 1", c.Monitor)
 	}
 	if !reflect.DeepEqual(c.PageRange.Pages, []int{2, 3, 4, 5}) {
 		t.Errorf("PageRange = %+v, want 2-5", c.PageRange)
@@ -132,12 +132,12 @@ auto = "2m"
 	if c.Transition != "fade" {
 		t.Errorf("Transition = %q, want fade", c.Transition)
 	}
-	if c.PresenterMonitor != 2 {
-		t.Errorf("PresenterMonitor = %d, want 2", c.PresenterMonitor)
+	if c.PresenterMonitor != "2" {
+		t.Errorf("PresenterMonitor = %q, want 2", c.PresenterMonitor)
 	}
 
 	// Now: explicit flag for --auto wins over sidecar.
-	c2, err := Load(Flags{PDFPath: pdf, StartPage: 1, Auto: 5 * time.Second, PresenterMonitor: -1})
+	c2, err := Load(Flags{PDFPath: pdf, StartPage: 1, Auto: 5 * time.Second, Changed: changed("auto")})
 	if err != nil {
 		t.Fatalf("Load with --auto: %v", err)
 	}
@@ -145,15 +145,77 @@ auto = "2m"
 		t.Errorf("flag --auto should win: got %v want 5s", c2.Auto)
 	}
 
-	c3, err := Load(Flags{PDFPath: pdf, StartPage: 1, Transition: "none", PresenterMonitor: 5})
+	c3, err := Load(Flags{PDFPath: pdf, StartPage: 1, Transition: "none", PresenterMonitor: "5", Changed: changed("transition", "presenter-monitor")})
 	if err != nil {
 		t.Fatalf("Load with presenter/transition flags: %v", err)
 	}
 	if c3.Transition != "none" {
 		t.Errorf("flag --transition should win: got %q want none", c3.Transition)
 	}
-	if c3.PresenterMonitor != 5 {
-		t.Errorf("flag --presenter-monitor should win: got %d want 5", c3.PresenterMonitor)
+	if c3.PresenterMonitor != "5" {
+		t.Errorf("flag --presenter-monitor should win: got %q want 5", c3.PresenterMonitor)
+	}
+
+	// Explicit flags win even when they equal the flag default.
+	c4, err := Load(Flags{
+		PDFPath: pdf, StartPage: 1, Monitor: "0", Background: "#000000", PresenterMonitor: "-1",
+		Changed: changed("start", "monitor", "bg", "presenter-monitor", "loop", "progress", "autoquit"),
+	})
+	if err != nil {
+		t.Fatalf("Load with default-valued flags: %v", err)
+	}
+	if c4.StartPage != 1 || c4.Monitor != "0" || c4.Background != (Color{0, 0, 0, 255}) {
+		t.Errorf("default-valued flags lost to sidecar: start=%d monitor=%q bg=%+v", c4.StartPage, c4.Monitor, c4.Background)
+	}
+	if c4.PresenterEnabled() {
+		t.Errorf("--presenter-monitor -1 should disable the sidecar's presenter view, got %q", c4.PresenterMonitor)
+	}
+	if c4.Loop || c4.Progress || c4.AutoQuit {
+		t.Errorf("--loop=false/--progress=false/--autoquit=false lost to sidecar: %v/%v/%v", c4.Loop, c4.Progress, c4.AutoQuit)
+	}
+}
+
+func changed(names ...string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+func TestLoadMonitorNamesAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deck.boozle.toml"), []byte(`monitor = "HDMI-1"`+"\npresenter_monitor = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Monitor != "HDMI-1" || c.PresenterMonitor != "0" || !c.PresenterEnabled() {
+		t.Errorf("monitor specs = %q / %q, want HDMI-1 / 0", c.Monitor, c.PresenterMonitor)
+	}
+
+	noSidecar := filepath.Join(dir, "other.pdf")
+	if err := os.WriteFile(noSidecar, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(Flags{PDFPath: noSidecar, StartPage: 1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Monitor != "0" || c.PresenterEnabled() {
+		t.Errorf("defaults: monitor=%q presenter=%q, want 0 and disabled", c.Monitor, c.PresenterMonitor)
+	}
+	if _, err := Load(Flags{PDFPath: noSidecar, StartPage: 1, Transition: "wipe"}); err == nil {
+		t.Error("unknown --transition should be rejected")
+	}
+	if _, err := Load(Flags{PDFPath: noSidecar, StartPage: 1, Pages: "1-999999999"}); err == nil {
+		t.Error("absurd --pages range should be rejected")
 	}
 }
 
@@ -163,7 +225,7 @@ func TestLoadNoSidecarStillWorks(t *testing.T) {
 	if err := os.WriteFile(pdf, []byte("dummy"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -195,7 +257,7 @@ func TestLoadPDFPCSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -226,7 +288,7 @@ func TestLoadPDFPCSidecarWithPagesFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, Pages: "1,5", StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, Pages: "1,5", StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -251,7 +313,7 @@ func TestLoadTOMLSidecarWinsOverPDFPC(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -289,7 +351,7 @@ func TestLoadPDFPCSidecarErrors(t *testing.T) {
 			if err := os.WriteFile(sidecar, []byte(tt.body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, StartPage: 1, PresenterMonitor: -1})
+			_, err := Load(Flags{PDFPath: pdf, ConfigPath: sidecar, StartPage: 1})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want containing %q", err, tt.want)
 			}
@@ -308,7 +370,7 @@ func TestLoadSidecarProgressAndAutoQuit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -319,14 +381,13 @@ func TestLoadSidecarProgressAndAutoQuit(t *testing.T) {
 		t.Error("AutoQuit should be true from sidecar")
 	}
 
-	// Explicit flag wins: setting Progress/AutoQuit true via flag keeps them true
-	// even when the sidecar would also set them (the flag path skips the sidecar check).
-	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, Progress: true, AutoQuit: true, PresenterMonitor: -1})
+	// Explicit flags win over the sidecar, in either direction.
+	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, Progress: false, AutoQuit: true, Changed: changed("progress", "autoquit")})
 	if err != nil {
 		t.Fatalf("Load with flags: %v", err)
 	}
-	if !c2.Progress || !c2.AutoQuit {
-		t.Error("explicit flag should keep Progress/AutoQuit true")
+	if c2.Progress || !c2.AutoQuit {
+		t.Errorf("explicit flags should win: Progress=%v AutoQuit=%v, want false/true", c2.Progress, c2.AutoQuit)
 	}
 }
 
@@ -337,7 +398,7 @@ func TestLoadCacheAndRenderScaleFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, CacheMB: 64, RenderScale: 0.75})
+	c, err := Load(Flags{PDFPath: pdf, StartPage: 1, CacheMB: 64, RenderScale: 0.75})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -348,13 +409,13 @@ func TestLoadCacheAndRenderScaleFlags(t *testing.T) {
 		t.Errorf("RenderScale = %v, want 0.75", c.RenderScale)
 	}
 
-	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, CacheMB: -1}); err == nil {
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, CacheMB: -1}); err == nil {
 		t.Error("negative CacheMB should be rejected")
 	}
-	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, RenderScale: 0.25}); err == nil {
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, RenderScale: 0.25}); err == nil {
 		t.Error("RenderScale below 0.5 should be rejected")
 	}
-	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, PresenterMonitor: -1, RenderScale: 1.5}); err == nil {
+	if _, err := Load(Flags{PDFPath: pdf, StartPage: 1, RenderScale: 1.5}); err == nil {
 		t.Error("RenderScale above 1.0 should be rejected")
 	}
 }
@@ -371,7 +432,7 @@ func TestLoadCacheAndRenderScaleSidecar(t *testing.T) {
 	}
 
 	// Sidecar fills when no flag provided.
-	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1})
+	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -383,7 +444,7 @@ func TestLoadCacheAndRenderScaleSidecar(t *testing.T) {
 	}
 
 	// Explicit flag wins over sidecar.
-	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, PresenterMonitor: -1, CacheMB: 32, RenderScale: 0.6})
+	c2, err := Load(Flags{PDFPath: pdfPath, StartPage: 1, CacheMB: 32, RenderScale: 0.6, Changed: changed("cache-mb", "render-scale")})
 	if err != nil {
 		t.Fatalf("Load with flags: %v", err)
 	}

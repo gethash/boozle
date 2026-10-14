@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,13 +16,16 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Flags is the raw input from cobra; zero-values mean "unset".
+// Flags is the raw input from cobra. Values hold cobra's defaults for
+// flags the user didn't pass; Changed records which flags were passed
+// explicitly (by long name), and only those override sidecar values.
 type Flags struct {
 	PDFPath          string
+	Changed          map[string]bool
 	Auto             time.Duration
 	Loop             bool
 	StartPage        int
-	MonitorIdx       int
+	Monitor          string // index or name; "" = primary
 	Pages            string
 	Background       string
 	NoFullscreen     bool
@@ -29,7 +33,7 @@ type Flags struct {
 	Progress         bool
 	AutoQuit         bool
 	Transition       string
-	PresenterMonitor int     // -1 = disabled
+	PresenterMonitor string  // index or name; "" or "-1" = disabled
 	CacheMB          int     // 0 = auto-size to display
 	RenderScale      float64 // 0 = native; 0.5..1.0 reduces per-page pixel count
 	DebugStats       bool    // print memory/render diagnostics to stderr
@@ -41,7 +45,7 @@ type Config struct {
 	Auto         time.Duration
 	Loop         bool
 	StartPage    int
-	MonitorIdx   int
+	Monitor      string // monitor spec (index or name) for the audience window
 	PageRange    PageRange
 	Background   Color
 	NoFullscreen bool
@@ -57,14 +61,34 @@ type Config struct {
 	Progress         bool    // show page-position and auto-advance progress overlay
 	AutoQuit         bool    // quit after the last page instead of stopping
 	Transition       string  // slide transition style: "none", "slide", "fade"
-	PresenterMonitor int     // -1 = disabled; monitor index for the presenter view window
+	PresenterMonitor string  // monitor spec for the presenter view; "" = disabled
 	CacheMB          int     // 0 = auto-size to display; otherwise hard cap in MB
 	RenderScale      float64 // 0 = native; 0.5..1.0 fraction of native pixels for renders
 	DebugStats       bool    // print memory/render diagnostics to stderr
 }
 
+// PresenterEnabled reports whether a presenter view was requested.
+func (c Config) PresenterEnabled() bool { return c.PresenterMonitor != "" }
+
 // Color is an RGBA color parsed from a hex string.
 type Color struct{ R, G, B, A uint8 }
+
+// MonitorSpec is a monitor selection in a sidecar: an index (monitor = 1)
+// or a name (monitor = "HDMI-1").
+type MonitorSpec string
+
+// UnmarshalTOML accepts both integers and strings.
+func (m *MonitorSpec) UnmarshalTOML(v any) error {
+	switch v := v.(type) {
+	case int64:
+		*m = MonitorSpec(strconv.FormatInt(v, 10))
+	case string:
+		*m = MonitorSpec(v)
+	default:
+		return fmt.Errorf("monitor must be an index or a name, got %T", v)
+	}
+	return nil
+}
 
 // sidecar is the normalized sidecar schema. TOML sidecars populate all fields;
 // pdfpc sidecars populate PlaybackPages and Notes.
@@ -72,13 +96,13 @@ type sidecar struct {
 	Auto             string         `toml:"auto"`
 	Loop             *bool          `toml:"loop"`
 	StartPage        *int           `toml:"start"`
-	MonitorIdx       *int           `toml:"monitor"`
-	Pages            string         `toml:"pages"`
-	Background       string         `toml:"bg"`
+	Monitor          *MonitorSpec   `toml:"monitor"`
+	Pages            *string        `toml:"pages"`
+	Background       *string        `toml:"bg"`
 	Progress         *bool          `toml:"progress"`
 	AutoQuit         *bool          `toml:"autoquit"`
-	Transition       string         `toml:"transition"`
-	PresenterMonitor *int           `toml:"presenter_monitor"`
+	Transition       *string        `toml:"transition"`
+	PresenterMonitor *MonitorSpec   `toml:"presenter_monitor"`
 	CacheMB          *int           `toml:"cache_mb"`
 	RenderScale      *float64       `toml:"render_scale"`
 	PerPage          []perPageEntry `toml:"page"`
@@ -93,14 +117,14 @@ type perPageEntry struct {
 }
 
 // Load resolves the final Config from flags + optional sidecar.
-// Precedence: explicit flags > sidecar > defaults.
+// Precedence: explicit flags > sidecar > flag defaults.
 func Load(f Flags) (Config, error) {
 	c := Config{
 		PDFPath:          f.PDFPath,
 		Auto:             f.Auto,
 		Loop:             f.Loop,
 		StartPage:        f.StartPage,
-		MonitorIdx:       f.MonitorIdx,
+		Monitor:          f.Monitor,
 		NoFullscreen:     f.NoFullscreen,
 		Progress:         f.Progress,
 		AutoQuit:         f.AutoQuit,
@@ -112,57 +136,38 @@ func Load(f Flags) (Config, error) {
 		PerPage:          map[int]time.Duration{},
 		Notes:            map[int]string{},
 	}
+	pagesSpec := f.Pages
+	bgSpec := f.Background
 
 	side, sidePath, err := loadSidecar(f.PDFPath, f.ConfigPath)
 	if err != nil {
 		return Config{}, err
 	}
-
-	pagesSpec := f.Pages
-	bgSpec := f.Background
-
 	if side != nil {
-		if c.Auto == 0 && side.Auto != "" {
+		// A sidecar value applies unless the same setting was given
+		// explicitly on the command line.
+		unset := func(flag string) bool { return !f.Changed[flag] }
+		if unset("auto") && side.Auto != "" {
 			d, err := time.ParseDuration(side.Auto)
 			if err != nil {
 				return Config{}, fmt.Errorf("%s: invalid auto duration %q: %w", sidePath, side.Auto, err)
 			}
 			c.Auto = d
 		}
-		if !f.Loop && side.Loop != nil {
-			c.Loop = *side.Loop
+		setIf(&c.Loop, side.Loop, unset("loop"))
+		setIf(&c.StartPage, side.StartPage, unset("start"))
+		setIf(&pagesSpec, side.Pages, unset("pages"))
+		setIf(&bgSpec, side.Background, unset("bg"))
+		setIf(&c.Progress, side.Progress, unset("progress"))
+		setIf(&c.AutoQuit, side.AutoQuit, unset("autoquit"))
+		setIf(&c.Transition, side.Transition, unset("transition"))
+		setIf(&c.CacheMB, side.CacheMB, unset("cache-mb"))
+		setIf(&c.RenderScale, side.RenderScale, unset("render-scale"))
+		if side.Monitor != nil && unset("monitor") {
+			c.Monitor = string(*side.Monitor)
 		}
-		if f.StartPage == 1 && side.StartPage != nil {
-			c.StartPage = *side.StartPage
-		}
-		if f.MonitorIdx == 0 && side.MonitorIdx != nil {
-			c.MonitorIdx = *side.MonitorIdx
-		}
-		if pagesSpec == "" {
-			pagesSpec = side.Pages
-		}
-		if bgSpec == "" || bgSpec == "#000000" {
-			if side.Background != "" {
-				bgSpec = side.Background
-			}
-		}
-		if !f.Progress && side.Progress != nil {
-			c.Progress = *side.Progress
-		}
-		if !f.AutoQuit && side.AutoQuit != nil {
-			c.AutoQuit = *side.AutoQuit
-		}
-		if c.Transition == "" && side.Transition != "" {
-			c.Transition = side.Transition
-		}
-		if c.PresenterMonitor == -1 && side.PresenterMonitor != nil {
-			c.PresenterMonitor = *side.PresenterMonitor
-		}
-		if c.CacheMB == 0 && side.CacheMB != nil {
-			c.CacheMB = *side.CacheMB
-		}
-		if c.RenderScale == 0 && side.RenderScale != nil {
-			c.RenderScale = *side.RenderScale
+		if side.PresenterMonitor != nil && unset("presenter-monitor") {
+			c.PresenterMonitor = string(*side.PresenterMonitor)
 		}
 		if side.HasPlaybackPages {
 			c.UsePlaybackPages = true
@@ -182,8 +187,22 @@ func Load(f Flags) (Config, error) {
 		}
 	}
 
-	if c.Transition == "" {
+	c.Monitor = strings.TrimSpace(c.Monitor)
+	if c.Monitor == "" {
+		c.Monitor = "0"
+	}
+	if pm := strings.TrimSpace(c.PresenterMonitor); pm == "-1" {
+		c.PresenterMonitor = ""
+	} else {
+		c.PresenterMonitor = pm
+	}
+
+	switch c.Transition {
+	case "":
 		c.Transition = "slide"
+	case "slide", "fade", "none":
+	default:
+		return Config{}, fmt.Errorf("--transition must be slide, fade or none, got %q", c.Transition)
 	}
 
 	pr, err := ParsePageRange(pagesSpec)
@@ -213,6 +232,13 @@ func Load(f Flags) (Config, error) {
 	}
 
 	return c, nil
+}
+
+// setIf copies *src into *dst when src is set and ok is true.
+func setIf[T any](dst *T, src *T, ok bool) {
+	if ok && src != nil {
+		*dst = *src
+	}
 }
 
 func loadSidecar(pdfPath, override string) (*sidecar, string, error) {
@@ -260,9 +286,8 @@ func parseSidecar(path string, data []byte) (*sidecar, error) {
 }
 
 type pdfpcSidecar struct {
-	Format          int         `json:"pdfpcFormat"`
-	DisableMarkdown bool        `json:"disableMarkdown"`
-	Pages           []pdfpcPage `json:"pages"`
+	Format int         `json:"pdfpcFormat"`
+	Pages  []pdfpcPage `json:"pages"`
 }
 
 type pdfpcPage struct {
@@ -387,12 +412,8 @@ func (p PageRange) Contains(n int) bool {
 	if p.All {
 		return true
 	}
-	for _, x := range p.Pages {
-		if x == n {
-			return true
-		}
-	}
-	return false
+	_, ok := slices.BinarySearch(p.Pages, n)
+	return ok
 }
 
 // Filter returns the subset of [1..total] that lies within the range.
@@ -412,6 +433,10 @@ func (p PageRange) Filter(total int) []int {
 	}
 	return out
 }
+
+// MaxPage bounds page numbers in --pages, so a typo like "1-999999999"
+// is rejected instead of allocating a billion-entry set.
+const MaxPage = 100000
 
 // ParsePageRange parses "1,3-5,8" syntax. Empty input means "all".
 func ParsePageRange(spec string) (PageRange, error) {
@@ -435,6 +460,9 @@ func ParsePageRange(spec string) (PageRange, error) {
 			if err != nil || b < a {
 				return PageRange{}, fmt.Errorf("invalid range %q", part)
 			}
+			if b > MaxPage {
+				return PageRange{}, fmt.Errorf("range %q exceeds page %d", part, MaxPage)
+			}
 			for i := a; i <= b; i++ {
 				seen[i] = struct{}{}
 			}
@@ -444,17 +472,15 @@ func ParsePageRange(spec string) (PageRange, error) {
 		if err != nil || n < 1 {
 			return PageRange{}, fmt.Errorf("invalid page %q", part)
 		}
+		if n > MaxPage {
+			return PageRange{}, fmt.Errorf("page %d exceeds %d", n, MaxPage)
+		}
 		seen[n] = struct{}{}
 	}
 	out := make([]int, 0, len(seen))
 	for n := range seen {
 		out = append(out, n)
 	}
-	// insertion sort — sets are tiny
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
+	slices.Sort(out)
 	return PageRange{Pages: out}, nil
 }

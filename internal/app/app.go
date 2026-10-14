@@ -102,9 +102,22 @@ func Run(cfg config.Config) error {
 	g.trans.style = parseTransStyle(cfg.Transition)
 	g.trans.frames = transFrames
 
+	audienceMon, err := display.Resolve(cfg.Monitor)
+	if err != nil {
+		return fmt.Errorf("--monitor: %w", err)
+	}
+	g.monitor = audienceMon
+
 	// ── Presenter view subprocess ─────────────────────────────────────────
-	if cfg.PresenterMonitor >= 0 {
-		if err := validatePresenterMonitor(cfg); err != nil {
+	// The presenter process is started once the audience window has been
+	// placed (see Update), so the two windows don't race for the window
+	// manager's attention and the presenter window ends up focused.
+	if cfg.PresenterEnabled() {
+		presenterMon, err := display.Resolve(cfg.PresenterMonitor)
+		if err != nil {
+			return fmt.Errorf("--presenter-monitor: %w", err)
+		}
+		if err := validatePresenterMonitor(audienceMon, presenterMon, cfg.NoFullscreen); err != nil {
 			return err
 		}
 		srv, err := ipc.Listen(ipc.Hello{PageList: pageList, Notes: cfg.Notes, StartedAt: g.startedAt, Loop: cfg.Loop})
@@ -118,16 +131,20 @@ func Run(cfg config.Config) error {
 		if err != nil {
 			return fmt.Errorf("resolve executable: %w", err)
 		}
-		cmd := exec.Command(self, presenterArgs(cfg, srv.Path())...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("spawn presenter: %w", err)
+		var child *exec.Cmd
+		g.spawnPresenter = func() error {
+			child = exec.Command(self, presenterArgs(cfg, presenterMon, srv.Path())...)
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+			if err := child.Start(); err != nil {
+				return fmt.Errorf("spawn presenter: %w", err)
+			}
+			return nil
 		}
 		defer func() {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
+			if child != nil && child.Process != nil {
+				_ = child.Process.Kill()
+				_ = child.Wait()
 			}
 		}()
 
@@ -144,25 +161,28 @@ func Run(cfg config.Config) error {
 	setWindowIcon()
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetScreenClearedEveryFrame(false)
-	if err := display.PickMonitor(cfg.MonitorIdx); err != nil {
+	if err := display.PrepareWindow(audienceMon, 1280, 800); err != nil {
 		return err
 	}
-	ebiten.SetWindowSize(1280, 800)
-	var runGame ebiten.Game = g
 	if !cfg.NoFullscreen {
-		runGame = &fullscreenOnMonitor{game: g, monitorIdx: cfg.MonitorIdx}
+		g.place = newMonitorPlacer(audienceMon)
+		g.place.debug = cfg.DebugStats
+		g.place.start()
 	}
 
-	if err := ebiten.RunGame(runGame); err != nil && !errors.Is(err, ErrQuit) {
+	err = ebiten.RunGameWithOptions(g, &ebiten.RunGameOptions{X11ClassName: "boozle", X11InstanceName: "audience"})
+	if err != nil && !errors.Is(err, ErrQuit) {
 		return err
 	}
 	return nil
 }
 
-// presenterArgs builds the command line for the presenter subprocess.
-func presenterArgs(cfg config.Config, socketPath string) []string {
+// presenterArgs builds the command line for the presenter subprocess. The
+// monitor is passed as the index resolved here, so both processes agree on
+// it even when names are ambiguous.
+func presenterArgs(cfg config.Config, monitor int, socketPath string) []string {
 	args := []string{
-		"--monitor", strconv.Itoa(cfg.PresenterMonitor),
+		"--monitor", strconv.Itoa(monitor),
 		"--_presenter-socket", socketPath,
 	}
 	if cfg.NoFullscreen {
@@ -214,15 +234,19 @@ func initialIndex(pageList []int, startPage1Based int) int {
 	return 0
 }
 
-func validatePresenterMonitor(cfg config.Config) error {
-	if cfg.PresenterMonitor == cfg.MonitorIdx && !cfg.NoFullscreen {
+func validatePresenterMonitor(audience, presenter int, windowed bool) error {
+	if audience == presenter && !windowed {
 		return fmt.Errorf(
-			"--presenter-monitor %d conflicts with --monitor %d: use different monitors or pass --no-fullscreen",
-			cfg.PresenterMonitor, cfg.MonitorIdx,
+			"presenter view and audience both resolve to monitor %d: use different monitors or pass --no-fullscreen",
+			audience,
 		)
 	}
 	return nil
 }
+
+// presenterSpawnTimeout starts the presenter even if fullscreen placement
+// of the audience window hasn't finished (2 s at 60 TPS).
+const presenterSpawnTimeout = 120
 
 // Game implements ebiten.Game for the audience window.
 type Game struct {
@@ -258,10 +282,15 @@ type Game struct {
 	trans transition
 	ov    overview
 
-	stateCh       chan ipc.PresenterState // nil when presenter view is disabled
-	presenterCmds <-chan ipc.PresenterCommand
-	lastSent      ipc.PresenterState
-	lastSentAt    time.Time
+	monitor int            // resolved audience monitor index
+	place   *monitorPlacer // fullscreen placement; nil when windowed
+
+	stateCh        chan ipc.PresenterState // nil when presenter view is disabled
+	presenterCmds  <-chan ipc.PresenterCommand
+	spawnPresenter func() error // starts the presenter process once; then nil
+	ticks          int
+	lastSent       ipc.PresenterState
+	lastSentAt     time.Time
 
 	redraw redrawGate[audienceFrame]
 	stats  *statsReporter
@@ -302,6 +331,15 @@ func (p *pageLabelCache) String(listIdx, total int) string {
 func (g *Game) Update() error {
 	if g.quit {
 		return ErrQuit
+	}
+	g.ticks++
+	g.place.tick(ebitenWindow{})
+	if g.spawnPresenter != nil && (g.place.settled() || g.ticks >= presenterSpawnTimeout) {
+		spawn := g.spawnPresenter
+		g.spawnPresenter = nil
+		if err := spawn(); err != nil {
+			return err
+		}
 	}
 	if g.pipe != nil {
 		g.pipe.drain()
@@ -756,9 +794,7 @@ func (g *Game) handleNavigation(presenterCmds []ipc.PresenterCommand) error {
 		g.listIdx = len(g.pageList) - 1
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF) || presenterCmdPressed(presenterCmds, presenterCmdFullscreen) {
-		if err := setFullscreenOnMonitor(g.cfg.MonitorIdx, !ebiten.IsFullscreen()); err != nil {
-			return err
-		}
+		g.place = toggleFullscreen(g.place, g.monitor)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyL) || presenterCmdPressed(presenterCmds, presenterCmdReturnLast) {
 		g.beginTransition(0)

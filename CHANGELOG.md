@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Monitors by name**: `--monitor` and `--presenter-monitor` (and `monitor` / `presenter_monitor` in sidecars) accept a name or a unique part of one — e.g. `--monitor HDMI-1` — besides an index. `--list-monitors` now prints each monitor's name, size and scale and marks the primary.
+- **Window-manager rules on Linux**: windows carry `WM_CLASS` `boozle` with instance `audience` or `presenter`.
 - **`--debug-stats`** (hidden): prints GPU/heap usage, cache occupancy, render queue lengths and render timings to stderr every two seconds, for both windows.
 - **`examples/sample.pdf`**: a small generated deck for local dev runs. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
 
@@ -31,6 +33,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Fullscreen on the wrong monitor (Linux)**: the window was moved to the target monitor and switched to fullscreen in the same frame, but Ebitengine picks the fullscreen monitor from a cached, position-based guess that lags behind X11's asynchronous moves — so fullscreen often landed on the primary display. Placement now waits until the window is reported on the target monitor, verifies the result after the cache refreshes and retries once (`--debug-stats` logs every step). The initial window is sized to fit inside the target monitor so it opens centred there, and the presenter process is started only after the audience window is placed, so the two windows no longer race for the window manager.
+- **Explicit flags always win over the sidecar**: flags given on the command line now override sidecar values even when they equal the default — e.g. `--monitor 0`, `--start 1`, `--bg '#000000'`, `--loop=false` or `-P -1` (which now turns off a sidecar's presenter view).
+- **Invalid values are rejected**: an unknown `--transition` is now an error instead of silently meaning `none`, and absurd `--pages` ranges (beyond page 100000) are refused instead of exhausting memory.
 - **PDFium heap race**: rendered bitmaps were freed inside the PDFium WebAssembly module from the main thread while the prefetcher or thumbnail loader could be rendering on the same instance. `RenderPage` now copies pixels into a pooled Go buffer and frees the PDFium bitmap before releasing the document lock, so WASM memory is only touched under the lock and holds at most one bitmap at a time.
 - **Windows could not open PDFs**: go-pdfium rejects drive-letter paths inside WebAssembly. The PDF's directory is now mounted read-only at `/doc` in the sandbox (instead of the whole filesystem) and opened by a POSIX path.
 - **`--no-fullscreen` with presenter view**: the presenter window now honours it too, so `--no-fullscreen --monitor 0 --presenter-monitor 0` really opens two windows for one-monitor testing.

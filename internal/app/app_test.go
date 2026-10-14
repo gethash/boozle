@@ -177,15 +177,15 @@ func TestAdvanceUpdatesNavigationStateOnMove(t *testing.T) {
 }
 
 func TestValidatePresenterMonitorAllowsSameMonitorWindowedOnly(t *testing.T) {
-	err := validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 0})
+	err := validatePresenterMonitor(0, 0, false)
 	if err == nil {
 		t.Fatal("same monitor fullscreen should fail")
 	}
-	err = validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 0, NoFullscreen: true})
+	err = validatePresenterMonitor(0, 0, true)
 	if err != nil {
 		t.Fatalf("same monitor with --no-fullscreen should work: %v", err)
 	}
-	err = validatePresenterMonitor(config.Config{MonitorIdx: 0, PresenterMonitor: 1})
+	err = validatePresenterMonitor(0, 1, false)
 	if err != nil {
 		t.Fatalf("different monitors should work: %v", err)
 	}
@@ -596,8 +596,8 @@ func TestRedrawGate(t *testing.T) {
 }
 
 func TestPresenterArgsForwardTuningFlags(t *testing.T) {
-	cfg := config.Config{PDFPath: "deck.pdf", PresenterMonitor: 1, NoFullscreen: true, CacheMB: 64, RenderScale: 0.75, DebugStats: true}
-	got := presenterArgs(cfg, "/tmp/x.sock")
+	cfg := config.Config{PDFPath: "deck.pdf", PresenterMonitor: "HDMI", NoFullscreen: true, CacheMB: 64, RenderScale: 0.75, DebugStats: true}
+	got := presenterArgs(cfg, 1, "/tmp/x.sock")
 	want := []string{"--monitor", "1", "--_presenter-socket", "/tmp/x.sock", "--no-fullscreen", "--cache-mb", "64", "--render-scale", "0.75", "--debug-stats", "deck.pdf"}
 	if len(got) != len(want) {
 		t.Fatalf("args = %q, want %q", got, want)

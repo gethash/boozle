@@ -2,7 +2,10 @@
 #
 # Place this file next to your PDF as `<file>.boozle.toml`
 # (e.g. `slides.pdf` → `slides.boozle.toml`) or pass it via `--config`.
-# Command-line flags take precedence over anything set here.
+# Flags given on the command line take precedence over anything set here.
+#
+# This file is auto-loaded with examples/sample.pdf, so
+# `boozle --no-fullscreen examples/sample.pdf` shows it in action.
 
 # Default time per slide. Any Go duration string works: 30s, 1m30s, 2m, 750ms.
 auto = "30s"
@@ -10,22 +13,25 @@ auto = "30s"
 # Loop back to page 1 after the last page.
 loop = true
 
-# 1-indexed start page (must be inside `pages` if `pages` is set).
+# 1-indexed start page. If `pages` excludes it, playback starts at the next
+# page that is included.
 start = 1
 
-# 0-indexed monitor for the audience display (0 = primary).
+# Monitor for the audience display: an index (0 = primary) or a name as
+# printed by `boozle --list-monitors`, e.g. "HDMI-1" or a unique part of it.
 monitor = 0
 
-# Monitor index for the presenter view (current + next slide, timers, clock, progress).
-# Set to a non-negative value to enable. Example: laptop screen = 0, projector = 1.
+# Monitor for the presenter view (current + next slide, notes, timers,
+# clock, progress). Set it to enable presenter view, e.g. laptop screen = 0,
+# projector = 1. Must differ from `monitor` unless running --no-fullscreen.
 # presenter_monitor = 1
 
 # Restrict playback to this page range. Comma-separated list of pages and
-# inclusive ranges. Omit or set to "" to play the entire deck.
-pages = "1-5,8,10-12"
+# inclusive ranges, e.g. "1-5,8,10-12". Omit to play the entire deck.
+# pages = "1-4,6"
 
-# Background fill colour shown around aspect-fitted pages and during
-# black-out / white-out swaps. #RGB, #RRGGBB, or #RRGGBBAA.
+# Background colour shown around aspect-fitted pages. #RGB, #RRGGBB, or
+# #RRGGBBAA. (Black-out and white-out always use pure black / white.)
 bg = "#000000"
 
 # Show a segmented progress bar at the bottom of the screen. Each segment
@@ -42,8 +48,13 @@ autoquit = false
 # Equivalent to --transition.
 transition = "slide"
 
-# Per-page duration overrides (1-indexed). Useful when one slide needs
-# longer than the rest, e.g. a busy diagram at page 3.
+# Memory tuning (see README "Performance and memory"):
+# cache_mb     = 64    # cap the GPU slide cache at 64 MB (0 = automatic)
+# render_scale = 0.75  # render at 75% of native pixels (0.5..1.0; 0 = native)
+
+# Per-page overrides (1-indexed): auto-advance duration and speaker notes
+# shown in presenter view. Useful when one slide needs longer than the rest,
+# e.g. a busy diagram at page 3.
 [[page]]
 n    = 3
 auto = "1m"
@@ -53,5 +64,5 @@ Pause for questions before moving on.
 """
 
 [[page]]
-n    = 8
+n    = 5
 auto = "5s"

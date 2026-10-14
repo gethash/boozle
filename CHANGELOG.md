@@ -7,10 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Release binaries for macOS Intel and Linux ARM64** (`darwin-amd64`, `linux-arm64`), which the installer already expected; every release build is smoke-tested with `--version`.
 - **Monitors by name**: `--monitor` and `--presenter-monitor` (and `monitor` / `presenter_monitor` in sidecars) accept a name or a unique part of one — e.g. `--monitor HDMI-1` — besides an index. `--list-monitors` now prints each monitor's name, size and scale and marks the primary.
 - **Window-manager rules on Linux**: windows carry `WM_CLASS` `boozle` with instance `audience` or `presenter`.
 - **`--debug-stats`** (hidden): prints GPU/heap usage, cache occupancy, render queue lengths and render timings to stderr every two seconds, for both windows.
-- **`examples/sample.pdf`**: a small generated deck for local dev runs. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
+- **`examples/sample.pdf`**: a small generated deck for local dev runs; `examples/sample.boozle.toml` now matches it and documents name-based monitors and memory settings. Render tests now use generated PDFs and run in CI on every OS instead of requiring `BOOZLE_TEST_PDF`.
 
 ### Changed
 

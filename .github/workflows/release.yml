@@ -8,9 +8,11 @@ on:
 permissions:
   contents: write
 
-# Builds run natively per OS because Ebiten requires CGO on macOS and Linux
-# (system OpenGL / Cocoa frameworks). Cross-compiling from one runner would
-# need goreleaser-cross or zig cc; we keep it simple for v1.
+# Builds run natively per OS/arch because Ebitengine requires CGO on macOS
+# and Linux (system OpenGL / Cocoa frameworks). Cross-compiling from one
+# runner would need goreleaser-cross or zig cc. GitHub's last Intel macOS
+# image (macos-15-intel) is scheduled to retire in 2027; at that point build
+# darwin-amd64 on macos-latest with CGO_CFLAGS/CGO_LDFLAGS="-arch x86_64".
 jobs:
   build:
     name: build-${{ matrix.target }}
@@ -22,10 +24,18 @@ jobs:
             os: macos-latest
             goos: darwin
             goarch: arm64
+          - target: darwin-amd64
+            os: macos-15-intel
+            goos: darwin
+            goarch: amd64
           - target: linux-amd64
             os: ubuntu-latest
             goos: linux
             goarch: amd64
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
           - target: windows-amd64
             os: windows-latest
             goos: windows
@@ -45,6 +55,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            xvfb \
             libgl1-mesa-dev \
             libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev \
             libxkbcommon-dev
@@ -66,6 +77,18 @@ jobs:
           go build -trimpath \
             -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
             -o "dist/boozle${ext}" ./cmd/boozle
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.goos }}" == "linux" ]]; then
+            xvfb-run -a dist/boozle --version
+          elif [[ "${{ matrix.goos }}" == "windows" ]]; then
+            dist/boozle.exe --version
+          else
+            dist/boozle --version
+          fi
 
       - name: Package (POSIX)
         if: matrix.goos != 'windows'

@@ -52,11 +52,11 @@ boozle slides.pdf --monitor 1 --presenter-monitor 0
 - **Speaker notes:** read notes from Boozle TOML sidecars, `.pdfpc` sidecars, or imported PowerPoint notes.
 - **PowerPoint speaker-note import:** extract `.pptx` notes once with `boozle notes import`, then present with only the PDF plus sidecar.
 - **Slide overview:** press `Tab` for a thumbnail grid and jump to any slide with the keyboard or mouse.
-- **Monitor selection:** list displays with `--list-monitors`, then choose audience and presenter monitors by index.
-- **HiDPI rendering:** rasterise pages at native monitor resolution for Retina, 4K, and mixed-DPI setups.
-- **Memory tuning:** cap the GPU page cache with `--cache-mb` or render below native resolution with `--render-scale`.
+- **Monitor selection:** list displays with `--list-monitors`, then choose audience and presenter monitors by index or by name (e.g. `--monitor HDMI-1`).
+- **HiDPI rendering:** rasterise pages at native monitor resolution for Retina and 4K displays.
+- **Fast and lean:** slides render in the background with prefetching, startup takes a fraction of a second, and memory stays bounded on large decks; `--cache-mb` and `--render-scale` tune it further.
 - **Sidecars:** keep deck-specific defaults next to the PDF in `.boozle.toml`; Boozle also understands `.pdfpc` sidecars.
-- **Single-binary distribution:** releases ship native binaries for macOS Apple Silicon, macOS Intel, Linux x86-64, and Windows x86-64.
+- **Single-binary distribution:** releases ship native binaries for macOS (Apple Silicon and Intel), Linux (x86-64 and ARM64), and Windows x86-64.
 
 ## Installation
 
@@ -83,6 +83,8 @@ Override the version or install directory with environment variables:
 BOOZLE_VERSION=v1.2.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
+
+On Linux the binary needs the usual X11/OpenGL runtime libraries, which desktop installs already have. On minimal systems install them with `sudo apt-get install libgl1 libxrandr2 libxinerama1 libxcursor1 libxi6 libxxf86vm1` (Debian/Ubuntu).
 
 #### macOS First Run
 
@@ -128,22 +130,34 @@ boozle slides.pdf --auto 20s --loop --progress
 boozle slides.pdf --auto 30s --autoquit
 ```
 
-Use `--auto <duration>` for timed advance. Add `--loop` for kiosk or lobby screens, or `--autoquit` when the deck should close after the final auto-advance.
+Use `--auto <duration>` for timed advance. Add `--loop` for kiosk or lobby screens, or `--autoquit` to close Boozle when it advances past the last slide — whether by timer or by pressing next. Without `--loop` or `--autoquit`, navigation simply stops at the first and last slide.
 
-### Presenter View
+### Displays and Presenter View
 
 ```bash
 boozle --list-monitors
+boozle slides.pdf --monitor 1
 boozle slides.pdf --monitor 1 --presenter-monitor 0
+boozle slides.pdf --monitor HDMI-1 --presenter-monitor 0
 ```
 
-The audience display is the main presentation window. Presenter view is a second window for the speaker. It shows current slide, next slide, notes, clock, elapsed time, slide counter, and auto-advance progress.
+`--list-monitors` prints every connected display with its index, name, size, and scale factor; index `0` is the primary display. `--monitor` and `--presenter-monitor` accept either the index or the name (case-insensitive, and any unique part of it works, e.g. `--monitor hdmi`). Names are stable across reboots on Linux and macOS, so they are the better choice in sidecars; on Windows every monitor is called "Generic PnP Monitor", so use indices there.
 
-In full-screen mode, `--monitor` and `--presenter-monitor` must point at different displays. For local testing on one monitor, run both windows in windowed mode:
+The audience display is the main presentation window. Presenter view is a second window for the speaker. It shows the current slide, next slide, notes, clock, elapsed time, slide counter, and auto-advance progress. Keys pressed in either window drive the presentation; `f` always toggles the audience window's fullscreen. While presenter view is active, the `Tab` overview opens on the presenter screen only, so the audience keeps seeing the current slide.
+
+In full-screen mode, the audience and presenter windows must be on different displays. For local testing on one monitor, run both windows in windowed mode:
 
 ```bash
 boozle slides.pdf --no-fullscreen --monitor 0 --presenter-monitor 0
 ```
+
+#### Linux Notes
+
+- Boozle uses X11. On Wayland desktops (GNOME, KDE) it runs through XWayland, which works for fullscreen presenting; window placement is ultimately up to the compositor.
+- Multi-monitor fullscreen needs the XRandR and Xinerama runtime libraries (`libxrandr2` and `libxinerama1` on Debian/Ubuntu). Without them, only one monitor is listed or fullscreen may land on the wrong display.
+- Boozle waits until the window manager has actually moved the window to the requested monitor before going fullscreen, verifies the result, and retries once. Run with `--debug-stats` to log each placement step if a display still ends up wrong — that log is the most useful thing to attach to a bug report.
+- The windows carry the X11 class `boozle` with instance `audience` or `presenter`, so tiling window managers (i3, sway via XWayland, KWin rules) can match them.
+- X11 reports a single scale factor for all monitors, so on mixed-DPI setups slides render at the global scale; use `--render-scale` or your desktop's scaling settings if that is too sharp or too soft.
 
 ### PowerPoint Speaker-Note Import
 
@@ -165,24 +179,22 @@ The importer supports modern `.pptx` files. Convert old binary `.ppt` files to `
 
 After import, Boozle only needs the PDF plus generated sidecar at presentation time.
 
-### Display Setup
-
-```bash
-boozle --list-monitors
-boozle slides.pdf --monitor 1
-boozle slides.pdf --monitor 1 --presenter-monitor 0
-```
-
-`--list-monitors` prints the index, name, and DPI scale of every connected display. Monitor index `0` is the primary display.
-
-### Performance Tuning
+### Performance and Memory
 
 ```bash
 boozle slides.pdf --cache-mb 64
 boozle slides.pdf --render-scale 0.75 --cache-mb 64
 ```
 
-`--cache-mb` hard-caps the GPU page cache. `--render-scale` rasterises pages at a fraction of native pixels (`0.5..1.0`), trading some sharpness for lower memory use on large decks or high-DPI displays.
+Boozle renders slides on a background worker and keeps the current slide plus its neighbours in a GPU cache, so turning a page is usually instant. Memory use is bounded by that cache, not by the length of the deck:
+
+- The cache budget is sized automatically from the display — about four full-screen slides, between 32 MB and 192 MB (more only on 5K+ displays, where three slides need more). It counts the GPU memory slides really occupy.
+- `--cache-mb <N>` replaces the automatic budget with a hard cap. Prefetching adapts so prefetched slides are not evicted before they are shown.
+- `--render-scale <F>` rasterises pages at a fraction of native pixels (`0.5..1.0`). Memory per slide falls with the square of the factor (`0.75` uses about 56%), at the cost of some sharpness. It is the strongest lever on 4K and Retina displays.
+- Presenter view runs as a second process with its own renderer and cache (sized for its smaller panes), so expect it to add to the total.
+- `--debug-stats` prints GPU and heap usage, cache occupancy, and render timings to stderr every two seconds, for both windows.
+
+Boozle keeps two caches in your user cache directory (`~/Library/Caches/boozle` on macOS, `~/.cache/boozle` on Linux, `%LocalAppData%\boozle` on Windows): the compiled PDF engine, which makes every launch after the first start in a fraction of a second, and overview thumbnails, which are pruned automatically after 30 days or beyond 200 MB. Set `BOOZLE_CACHE_DIR` to use a different location; deleting the directory is always safe.
 
 ## Command Reference
 
@@ -197,18 +209,19 @@ boozle <file.pdf> [flags]
 | `-a, --auto <duration>` | `0` / disabled | Advance every duration, e.g. `30s`, `1m30s`; `0` disables. |
 | `-l, --loop` | `false` | Loop back to first page after last. |
 | `-s, --start <N>` | `1` | Start at page N, 1-indexed. |
-| `-m, --monitor <N>` | `0` | Monitor index for the audience display; `0` is primary. |
+| `-m, --monitor <N\|name>` | `0` | Audience monitor: index (`0` is primary) or name, see `--list-monitors`. |
 | `--pages <range>` | all pages | Restrict to a page range, e.g. `3-7,10`. |
 | `--bg <hex>` | `#000000` | Background color hex: `#RGB`, `#RRGGBB`, or `#RRGGBBAA`. |
 | `--no-fullscreen` | `false` | Windowed mode for debugging or one-monitor presenter testing. |
 | `--config <path>` | auto | Explicit sidecar config path, `.boozle.toml` or `.pdfpc`. |
 | `--progress` | `false` | Show page-position and auto-advance progress overlay. |
 | `--autoquit` | `false` | Quit after the last page instead of stopping. |
-| `--transition <style>` | unset / `slide` | Slide transition style: `slide`, `fade`, or `none`; unset uses `slide`. |
-| `-P, --presenter-monitor <N>` | `-1` / disabled | Monitor index for presenter view. |
+| `--transition <style>` | `slide` | Slide transition style: `slide`, `fade`, or `none`. |
+| `-P, --presenter-monitor <N\|name>` | disabled | Presenter view monitor: index or name; `-1` or empty disables it. |
 | `-M, --list-monitors` | `false` | List available monitors and exit. |
 | `--cache-mb <N>` | `0` / auto | GPU page cache cap in MB; `0` auto-sizes to display. |
 | `--render-scale <F>` | `0` / native | Render at fraction of native pixels (`0.5..1.0`); `0` keeps native. |
+| `--debug-stats` | `false` | Print memory, render and monitor-placement diagnostics to stderr. |
 | `-h, --help` | | Show help. |
 | `-v, --version` | | Show version. |
 
@@ -227,7 +240,7 @@ boozle notes import <file.pptx> [flags]
 
 ## Keyboard Controls
 
-The same navigation keys work from the audience display and from presenter view when that window has focus.
+The same keys work from the audience display and from presenter view when that window has focus. The mouse cursor hides itself after three seconds without movement.
 
 | Key | Action |
 |---|---|
@@ -235,20 +248,22 @@ The same navigation keys work from the audience display and from presenter view 
 | `Left`, `PgUp`, scroll up | Previous page. |
 | `Backspace` | Previous page, or delete a digit while typing a page number. |
 | `Home` / `End` | First / last page. |
-| Digits then `Enter` | Jump to a page number, e.g. `1`, `2`, `Enter` jumps to page 12. |
-| `l` | Return to the previously viewed page. |
+| Digits then `Enter` | Jump to a page number, e.g. `1`, `2`, `Enter` jumps to page 12 (top-row or numpad digits). |
+| `l` | Return to the previously viewed page (after any jump, including `Home`, `End`, and page numbers). |
 | `p` | Pause / resume auto-advance. |
 | `b` | Toggle black-out screen. |
 | `w` | Toggle white-out screen. |
-| `f` | Toggle fullscreen. |
-| `Tab` | Open slide overview; use arrow keys or click to select, `Enter` to jump. |
+| `f` | Toggle fullscreen (of the audience window). |
+| `Tab` | Open the slide overview (not while blacked or whited out). |
 | `q`, `Esc` | Quit. |
+
+In the overview, the arrow keys move the selection (`Up` / `Down` by a whole row), `Enter` or a click jumps to the selected slide, `Tab` or `Esc` closes it without jumping, and `q` quits.
 
 ## Sidecar Configuration
 
 Create `slides.boozle.toml` next to `slides.pdf`, or pass a path with `--config`. Boozle also auto-loads `slides.pdfpc` when no Boozle TOML sidecar exists.
 
-CLI flags override sidecar values. Sidecars are a good place for deck-specific defaults:
+Flags given on the command line always override sidecar values — even when they repeat a default, so `--monitor 0` or `-P -1` overrides a sidecar's `monitor` or `presenter_monitor`. Sidecars are a good place for deck-specific defaults:
 
 ```toml
 auto       = "30s"
@@ -261,7 +276,7 @@ progress   = true
 autoquit   = false
 transition = "fade"
 
-# presenter_monitor = 1
+# presenter_monitor = "HDMI-1"   # index or name
 # cache_mb     = 64
 # render_scale = 0.75
 
@@ -278,7 +293,7 @@ n    = 8
 auto = "5s"
 ```
 
-Supported top-level TOML keys are `auto`, `loop`, `start`, `monitor`, `pages`, `bg`, `progress`, `autoquit`, `transition`, `presenter_monitor`, `cache_mb`, and `render_scale`.
+Supported top-level TOML keys are `auto`, `loop`, `start`, `monitor`, `pages`, `bg`, `progress`, `autoquit`, `transition`, `presenter_monitor`, `cache_mb`, and `render_scale`. `monitor` and `presenter_monitor` take an index or a monitor name.
 
 Per-page entries use `[[page]]` with:
 
@@ -294,7 +309,7 @@ A complete annotated example lives at [examples/sample.boozle.toml](examples/sam
 
 `.pdfpc` sidecars are JSON files created by PDF Presenter Console. Boozle imports their page order, skips entries marked `hidden`, preserves duplicate page entries used for overlays, and shows plain-text `note` values in presenter view.
 
-pdfpc-specific features such as movies, drawing state, timers, and transition metadata are ignored.
+pdfpc-specific features such as movies, drawing state, timers, transition metadata, and Markdown formatting of notes are ignored; notes are shown as plain text.
 
 ## Examples
 
@@ -342,7 +357,9 @@ go build -o boozle ./cmd/boozle
 ./boozle --no-fullscreen examples/sample.pdf
 ```
 
-Requirements: Go 1.26.2+ and a working CGO toolchain. Ebiten links system OpenGL on Linux/Windows and Cocoa/Metal on macOS.
+`examples/sample.pdf` is a small generated deck with a matching `examples/sample.boozle.toml` sidecar.
+
+Requirements: Go 1.26.2+ and a working CGO toolchain. Ebitengine links system OpenGL on Linux/Windows and Cocoa/Metal on macOS.
 
 On Linux, install the native windowing dependencies:
 
@@ -356,9 +373,11 @@ Run tests:
 ```bash
 go test ./...
 
-# Render-path coverage requires a real PDF:
+# Optionally also render a real-world PDF of your choice:
 BOOZLE_TEST_PDF=/path/to/any.pdf go test -count=1 ./internal/pdf/...
 ```
+
+The render path is covered by small PDFs generated during the tests, so no fixture is needed.
 
 On headless Linux CI, run tests that import Ebitengine under Xvfb:
 
@@ -368,11 +387,12 @@ xvfb-run -a go test -race -count=1 ./...
 
 ## How It Works
 
-- **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) compiled to WebAssembly and run inside [`wazero`](https://github.com/tetratelabs/wazero), so Boozle does not ship a native PDFium `.dylib`, `.so`, or `.dll`.
-- **Windowing and input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles windows, fullscreen, vsync, monitor selection, input, and HiDPI scale factors.
-- **Presenter view:** the audience display is the source of truth and streams presenter state over a local socket; presenter-window key presses are forwarded back so either display can drive the deck.
+- **Rendering:** [PDFium](https://pdfium.googlesource.com/pdfium/) compiled to WebAssembly and run inside [`wazero`](https://github.com/tetratelabs/wazero), so Boozle does not ship a native PDFium `.dylib`, `.so`, or `.dll`. The compiled module is cached on disk, so only the first launch pays for compilation.
+- **Render scheduling:** a single background worker per window renders by priority — the slide on screen first, then the presenter's next slide and the overview, then prefetch, then overview thumbnails. Navigation never waits for a render: until the new slide is ready, the previous one (or a scaled render of the new one) stays up.
+- **Caching:** an LRU of GPU images keyed by page and pixel size keeps the current and nearby slides; its budget counts real GPU memory. Overview thumbnails have their own small cache and are also stored on disk.
+- **Windowing and input:** [Ebitengine](https://github.com/hajimehoshi/ebiten) handles windows, fullscreen, vsync, monitor selection, input, and HiDPI scale factors. Frames that would look identical are skipped, so a static slide costs almost no GPU time.
+- **Presenter view:** a second Boozle process. The audience display is the source of truth: it sends the play list and notes once over a private local socket and afterwards only state changes; presenter-window key presses are forwarded back so either display can drive the deck.
 - **Speaker notes:** Boozle reads `[[page]] notes` entries from TOML sidecars or `note` fields from `.pdfpc` sidecars. The `.pptx` importer writes normal TOML notes entries.
-- **Caching:** an LRU keyed by page and pixel dimensions keeps the current and nearby pages rasterised; background prefetch prepares likely next pages.
 - **Sidecars:** [BurntSushi/toml](https://github.com/BurntSushi/toml) parses Boozle TOML config, the standard library parses pdfpc JSON, and [cobra](https://github.com/spf13/cobra)/[pflag](https://github.com/spf13/pflag) provide the CLI flag layer.
 
 ## License

@@ -39,6 +39,9 @@ type PresenterState struct {
 	// presenter can animate the bar without a message per frame.
 	Fraction       float64 `json:"fraction"`
 	FractionPerSec float64 `json:"fraction_per_sec"`
+	// SlideSeconds is the current slide's auto-advance interval (0 when
+	// auto-advance is off), for the remaining-time countdown.
+	SlideSeconds float64 `json:"slide_seconds,omitempty"`
 
 	Overview PresenterOverviewState `json:"overview"`
 }
@@ -48,6 +51,15 @@ type PresenterState struct {
 func (s PresenterState) FractionAt(received, now time.Time) float64 {
 	f := s.Fraction + now.Sub(received).Seconds()*s.FractionPerSec
 	return min(1, max(0, f))
+}
+
+// RemainingAt is the time left on the current slide's auto-advance timer,
+// extrapolated like FractionAt, or 0 when auto-advance is off.
+func (s PresenterState) RemainingAt(received, now time.Time) time.Duration {
+	if s.SlideSeconds <= 0 {
+		return 0
+	}
+	return time.Duration((1 - s.FractionAt(received, now)) * s.SlideSeconds * float64(time.Second))
 }
 
 // PresenterOverviewState mirrors the master's overview session so the

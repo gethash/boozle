@@ -55,7 +55,21 @@ This product embeds and/or links to the following third-party components:
   Copyright jolestar.
   Licensed under the Apache License, Version 2.0.
 
-* Go supplementary modules golang.org/x/net, x/sync, x/sys and x/text
+* go-text/typesetting (https://github.com/go-text/typesetting)
+  Copyright The go-text authors.
+  Licensed under the Unlicense or the BSD-3-Clause License.
+
+* uniseg (https://github.com/rivo/uniseg)
+  Copyright (c) 2019 Oliver Kuederle.
+  Licensed under the MIT License.
+
+* Geist and Geist Mono fonts (https://github.com/vercel/geist-font),
+  embedded in internal/app/fonts/
+  Copyright 2024 The Geist Project Authors.
+  Licensed under the SIL Open Font License, Version 1.1
+  (internal/app/fonts/OFL.txt).
+
+* Go supplementary modules golang.org/x/image, x/net, x/sync, x/sys and x/text
   (https://go.googlesource.com/)
   Copyright (c) 2009 The Go Authors.
   Licensed under the BSD-3-Clause License.

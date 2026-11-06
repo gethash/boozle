@@ -12,7 +12,8 @@ import (
 //go:embed assets/icon.png
 var iconPNG []byte
 
-// setWindowIcon applies the embedded boozle icon to the current window.
+// setWindowIcon applies the embedded boozle icon (the design system's
+// boozle-app-icon.svg, rendered at 512 px) to the current window.
 // macOS ignores SetWindowIcon and reads from the .app bundle's Info.plist
 // instead — this is a no-op there but still correct on Linux and Windows.
 func setWindowIcon() {

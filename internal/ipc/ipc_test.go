@@ -110,3 +110,20 @@ func TestFractionAtExtrapolatesAndClamps(t *testing.T) {
 		t.Fatalf("paused FractionAt = %v, want 0.3", got)
 	}
 }
+
+func TestRemainingAt(t *testing.T) {
+	recv := time.Unix(100, 0)
+	st := PresenterState{Fraction: 0.25, FractionPerSec: 0.05, SlideSeconds: 20}
+	if got := st.RemainingAt(recv, recv); got != 15*time.Second {
+		t.Fatalf("RemainingAt(recv) = %v, want 15s", got)
+	}
+	if got := st.RemainingAt(recv, recv.Add(5*time.Second)); got != 10*time.Second {
+		t.Fatalf("RemainingAt(+5s) = %v, want 10s", got)
+	}
+	if got := st.RemainingAt(recv, recv.Add(time.Minute)); got != 0 {
+		t.Fatalf("RemainingAt past the end = %v, want 0", got)
+	}
+	if got := (PresenterState{Fraction: 0.5}).RemainingAt(recv, recv); got != 0 {
+		t.Fatalf("RemainingAt without auto-advance = %v, want 0", got)
+	}
+}

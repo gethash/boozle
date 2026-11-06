@@ -12,7 +12,9 @@ const (
 	transFade             // cross-dissolve
 )
 
-const transFrames = 18 // ~300 ms at 60 fps
+// transFrames is the slide/fade transition length at 60 TPS: the design
+// system's duration-slide (640 ms), eased with ease-in-out.
+const transFrames = 38
 
 // transition holds the outgoing slide while a page-change animation runs.
 // The outgoing image stays pinned in the cache — no copy is made. The

@@ -277,7 +277,9 @@ type Game struct {
 	cursorIdleFrames int
 	quit             bool // set by advance() when --autoquit fires
 
-	pageLabel pageLabelCache // cached fmt.Sprintf for the bottom-right counter
+	pageLabel pageLabelCache // cached HUD slide counter
+	countdown countdownCache // cached HUD countdown
+	hudBar    segmentedBar
 
 	trans transition
 	ov    overview
@@ -310,8 +312,8 @@ type prefetchSig struct {
 	listIdx, bufW, bufH, dir int
 }
 
-// pageLabelCache memoises the "12 / 84"-style page counter so we don't
-// rebuild the string in fmt.Sprintf on every Draw call.
+// pageLabelCache memoises the "03 / 12"-style slide counter so we don't
+// rebuild the string on every Draw call.
 type pageLabelCache struct {
 	listIdx int
 	total   int
@@ -322,7 +324,7 @@ func (p *pageLabelCache) String(listIdx, total int) string {
 	if p.s == "" || p.listIdx != listIdx || p.total != total {
 		p.listIdx = listIdx
 		p.total = total
-		p.s = fmt.Sprintf("%d / %d", listIdx+1, total)
+		p.s = formatCounter(listIdx+1, total)
 	}
 	return p.s
 }
@@ -445,6 +447,7 @@ type audienceFrame struct {
 	listIdx            int
 	fraction           float64
 	paused             bool
+	countdown          string
 	ovPhase            ovPhase
 	ovAnim             float64
 	ovSel, ovHover     int
@@ -468,6 +471,9 @@ func (g *Game) frame() audienceFrame {
 	if g.cfg.Progress {
 		f.fraction = g.autoProgressFraction()
 		f.paused = g.auto.Paused()
+		if g.autoDuration() > 0 {
+			f.countdown = g.countdown.String(g.autoRemaining())
+		}
 	}
 	if g.shouldDrawOverviewOnAudience() {
 		f.ovPhase, f.ovAnim = g.ov.phase, g.ov.anim
@@ -483,7 +489,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if !g.redraw.needed(g.frame(), time.Now()) {
 		return
 	}
-	resetTextPool()
 	switch {
 	case g.blackout:
 		screen.Fill(color.RGBA{0, 0, 0, 255})
@@ -678,6 +683,7 @@ func (g *Game) presenterState() ipc.PresenterState {
 		Paused:         g.auto.Paused(),
 		Fraction:       g.autoProgressFraction(),
 		FractionPerSec: g.auto.Rate(),
+		SlideSeconds:   g.autoDuration().Seconds(),
 	}
 	if g.ov.phase != ovOff {
 		st.Overview = ipc.PresenterOverviewState{
@@ -720,6 +726,25 @@ func (g *Game) broadcastState() {
 		default:
 		}
 	}
+}
+
+// autoDuration is the current slide's auto-advance interval, or 0 when
+// auto-advance is off.
+func (g *Game) autoDuration() time.Duration {
+	if g.auto == nil {
+		return 0
+	}
+	return g.auto.Duration()
+}
+
+// autoRemaining is the time left on the current slide's auto-advance timer
+// (frozen while paused), or 0 when auto-advance is off.
+func (g *Game) autoRemaining() time.Duration {
+	d := g.autoDuration()
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(float64(d) * (1 - g.autoProgressFraction()))
 }
 
 func (g *Game) autoProgressFraction() float64 {

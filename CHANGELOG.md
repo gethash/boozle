@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-06
+
+### Changed
+
+- **Boozle design system.** The presenter view, slide overview and progress HUD now follow the Boozle design system used on boozle.io: its dark colour tokens, rounded panels, Geist and Geist Mono type, and the spectrum reserved for time and progress.
+  - **Progress HUD** (`--progress`): thin pill segments float above the bottom edge, with the spectrum running across them, a `03 / 12` slide counter and, with auto-advance, a `00:14` countdown.
+  - **Presenter view**: the clock, slide and elapsed values are set in Geist Mono and sized to fit. A countdown ring shows the time left on the current slide, and PAUSED is shown in amber.
+  - **Speaker notes** are set in Geist with full Unicode support: curly quotes, dashes, bullets and non-Latin scripts are no longer folded to ASCII.
+  - **Overview**: the selected slide gets a cyan focus ring. The overview opens in 280 ms and closes in 180 ms.
+  - **Slide transitions** (`slide`, `fade`) take 640 ms instead of 300 ms, with a softer ease-in-out, matching the design system's `duration-slide`.
+  - **Window icon**: the new app icon.
+
 ## [1.3.1] — 2026-11-06
 
 ### Changed

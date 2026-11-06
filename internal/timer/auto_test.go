@@ -170,3 +170,23 @@ func TestRate(t *testing.T) {
 		t.Fatalf("Rate inactive = %v, want 0", got)
 	}
 }
+
+func TestDurationFollowsPageAndSurvivesPause(t *testing.T) {
+	if d := New(0, nil).Duration(); d != 0 {
+		t.Fatalf("inactive Duration = %v, want 0", d)
+	}
+	c := &fakeClock{t: time.Unix(0, 0)}
+	a := newWithClock(10*time.Second, map[int]time.Duration{2: 30 * time.Second}, c)
+	a.Reset(1)
+	if d := a.Duration(); d != 10*time.Second {
+		t.Fatalf("page 1 Duration = %v, want 10s", d)
+	}
+	a.Reset(2)
+	if d := a.Duration(); d != 30*time.Second {
+		t.Fatalf("page 2 Duration = %v, want the 30s override", d)
+	}
+	a.TogglePause(2)
+	if d := a.Duration(); d != 30*time.Second {
+		t.Fatalf("paused Duration = %v, want 30s kept", d)
+	}
+}

@@ -34,6 +34,8 @@ CI also runs `gofmt -l`, `go mod tidy -diff`, `go vet` and staticcheck.
   - `presenter.go` presenter process (`PresenterGame`): current/next panes, clock, notes; forwards keys to the audience process.
   - `slides.go` `pipeline`: per-window slide cache + thumbnail store + render scheduler; `resolve` returns an exact render or a same-page stand-in.
   - `overview.go` the `Tab` grid, shared by both windows (the presenter process draws it when presenter view is on).
+  - `overlay.go` audience progress HUD, the shared segmented progress bar and countdown ring.
+  - `theme.go` design tokens (colours, spectrum, spacing, radii, easing) from the Boozle design system; `fonts.go` embedded Geist / Geist Mono and the face cache; `draw.go` text, rounded-rect and gradient helpers.
   - `window.go` fullscreen placement state machine; `redraw.go` frame-skipping; `stats.go` `--debug-stats`; `thumb_cache.go` thumbnail GPU/disk cache.
 - [internal/pdf/](internal/pdf/) — `renderer.go` PDFium-WASM wrapper, `scheduler.go` prioritised render worker, `cache.go` LRU of GPU images with pinning, `pdftest/` tiny PDF writer for tests and the sample deck.
 - [internal/ipc/](internal/ipc/) — audience↔presenter unix socket (newline-delimited JSON).
@@ -61,7 +63,9 @@ Rendering: PDFium compiled to WebAssembly (embedded by go-pdfium), run inside `w
 - **Fullscreen on a monitor (Linux):** Ebitengine picks the fullscreen monitor from a position-based guess cached ~60 ticks, and X11 moves are async. Never call `SetMonitor` + `SetFullscreen` in one tick — use `monitorPlacer` (wait → move → poll until reported → fullscreen → verify → retry once). Monitors are compared by identity (`display.Current`), not name (Windows names are all "Generic PnP Monitor").
 - **Presenter view is a re-exec** of the binary with `--_presenter-socket`; it is spawned after the audience window is placed and gets the *resolved* monitor index. IPC: one `Hello` (play list, notes, start time, loop) per connection, then `PresenterState` only on change; the presenter extrapolates clock and progress. In presenter mode the overview (and its thumbnails) live only in the presenter process.
 - **Flag precedence:** explicit flags (cobra `Changed`, passed as `config.Flags.Changed`) beat sidecar values, which beat flag defaults. Tests must set `Changed` for flags they expect to win.
-- **Debug font** (`ebitenutil.DebugPrintAt`) covers U+0000–U+00FF only; `debugFontText` maps typographic characters to ASCII. Glyphs are 6 px wide.
+- **Design system.** UI colours come from the Boozle design system's tokens (dark theme) in `theme.go`; `TestThemeTokensMatchDesignSystem` pins them. No `color.RGBA` literals in draw code. The spectrum means time: only progress segments and the countdown ring use it, never text, borders or fills. Note `color.RGBA` is premultiplied — use `withAlpha` for translucency.
+- **UI sizes are design px × `uiUnit(bufW, bufH)`** (short side / 720, at least 1). The buffer is already physical pixels, so this covers HiDPI, 4K and `--render-scale`. The audience HUD sizes itself from screen percentages instead (`layoutHUD`).
+- **Text** is `text/v2` with the embedded variable Geist (sans) and Geist Mono (labels, numbers) — weights via the `wght` axis, faces cached by `uiFace`. text/v2 has no letter-spacing: `drawText`'s tracking draws rune by rune. Fit numbers with `fitTextSize` and centre them with `drawCapsCentred` (cap height, not the line box).
 - **Version string:** `main.version` defaults to the newest CHANGELOG release (Homebrew builds from source without ldflags); `TestDefaultVersionMatchesChangelog` enforces it — bump both together.
 
 ## Releases

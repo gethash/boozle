@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"math"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/gethash/boozle/internal/ipc"
@@ -18,8 +18,10 @@ import (
 )
 
 const (
-	ovEnterFrames = 25
-	ovExitFrames  = 18
+	// Enter/exit animation lengths at 60 TPS (280 ms / 180 ms, the design
+	// system's sheet timings: UI motion stays under 300 ms, exits faster).
+	ovEnterFrames = 17
+	ovExitFrames  = 11
 
 	overviewMaxThumbPixels       = 180
 	overviewThumbsPerSelection   = 32
@@ -116,18 +118,20 @@ func computeOverviewLayout(bufW, bufH int) overviewLayout {
 
 	previewPanel := presenterRect{x: margin, y: margin, w: leftW, h: fullH}
 	gridPanel := presenterRect{x: margin + leftW + gap, y: margin, w: rightW, h: fullH}
+	pad, head := panelInsets(uiUnit(bufW, bufH))
 	return overviewLayout{
-		previewPanel:   previewPanel,
-		previewContent: insetPresenterRect(previewPanel, 16, 44, 16, 44),
+		previewPanel: previewPanel,
+		// The bottom inset leaves room for the slide counter.
+		previewContent: insetPresenterRect(previewPanel, pad, head, pad, head),
 		gridPanel:      gridPanel,
-		gridContent:    insetPresenterRect(gridPanel, 14, 44, 14, 14),
+		gridContent:    insetPresenterRect(gridPanel, pad, head, pad, pad),
 	}
 }
 
 // computeOvGrid lays out the thumbnail grid inside the framed overview panel.
 func computeOvGrid(n, bufW, bufH int) (gridX, gridY, cols int, cellW, cellH, padding float64) {
 	content := computeOverviewLayout(bufW, bufH).gridContent
-	padding = 12.0
+	padding = math.Round(space3 * uiUnit(bufW, bufH))
 	if n == 0 {
 		return content.x, content.y, 1, float64(content.w) - 2*padding, float64(content.h) - 2*padding, padding
 	}
@@ -364,19 +368,6 @@ func (ov *overview) updateHover() (clicked int) {
 
 func (ov *overview) useStaticGrid(n int) bool {
 	return n >= overviewSimpleAnimSlides || ov.phase == ovActive || ov.phase == ovExiting
-}
-
-func easeInOut(t float64) float64 {
-	t = clamp01(t)
-	if t < 0.5 {
-		return 4 * t * t * t
-	}
-	return 1 - math.Pow(-2*t+2, 3)/2
-}
-
-func easeOut(t float64) float64 {
-	t = clamp01(t)
-	return 1 - math.Pow(1-t, 3)
 }
 
 func clamp01(t float64) float64 {
@@ -623,14 +614,12 @@ func (ov *overview) draw(screen *ebiten.Image, p *pipeline, cur *ebiten.Image, c
 	case ovExiting:
 		scrimAlpha = lerpF(230, 0, easeInOut(ov.anim))
 	}
-	vector.FillRect(screen, 0, 0, float32(ov.bufW), float32(ov.bufH),
-		color.RGBA{8, 10, 18, uint8(scrimAlpha)}, false)
+	vector.FillRect(screen, 0, 0, float32(ov.bufW), float32(ov.bufH), withAlpha(tokGround, scrimAlpha/255), false)
 
+	u := uiUnit(ov.bufW, ov.bufH)
 	lo := computeOverviewLayout(ov.bufW, ov.bufH)
-	drawPresenterPanel(screen, lo.previewPanel)
-	drawPresenterPanel(screen, lo.gridPanel)
-	drawPresenterText(screen, "SELECTED", lo.previewPanel.x+18, lo.previewPanel.y+14, 2, colorLabel)
-	drawPresenterText(screen, "OVERVIEW", lo.gridPanel.x+18, lo.gridPanel.y+14, 2, colorLabel)
+	drawLabelledPanel(screen, lo.previewPanel, "Selected", u)
+	drawLabelledPanel(screen, lo.gridPanel, "Overview", u)
 
 	ov.drawPreview(screen, p, cur, curRect, lo.previewContent)
 	if ov.useStaticGrid(n) {
@@ -649,9 +638,11 @@ func (ov *overview) draw(screen *ebiten.Image, p *pipeline, cur *ebiten.Image, c
 	if ov.phase == ovActive && ov.selIdx >= 0 && ov.selIdx < n {
 		if ov.labelSel != ov.selIdx {
 			ov.labelSel = ov.selIdx
-			ov.label = fmt.Sprintf("p. %d / %d", ov.pageList[ov.selIdx]+1, n)
+			ov.label = formatCounter(ov.selIdx+1, n)
 		}
-		drawPresenterText(screen, ov.label, lo.previewPanel.x+18, lo.previewPanel.y+lo.previewPanel.h-32, 2, color.RGBA{248, 250, 252, 220})
+		pad, head := panelInsets(u)
+		drawStyled(screen, ov.label, styleCounter, u, float64(lo.previewPanel.x+pad),
+			float64(lo.previewPanel.y+lo.previewPanel.h)-float64(head)/2, text.AlignStart, text.AlignCenter, tokInk)
 	}
 }
 
@@ -820,9 +811,9 @@ func (ov *overview) drawTile(screen *ebiten.Image, i int) {
 // placeholder until it loads, and returns where the image landed.
 func drawOverviewTileBase(dst *ebiten.Image, img *ebiten.Image, tx, ty, tw, th, alpha float64) rectF {
 	if img == nil {
-		if a := uint8(alpha * 200); a > 0 {
-			vector.FillRect(dst, float32(tx), float32(ty), float32(tw), float32(th),
-				color.RGBA{31, 41, 55, a}, false)
+		if alpha > 0 {
+			r := float32(min(tw, th) * 0.04)
+			fillRoundRect(dst, float32(tx), float32(ty), float32(tw), float32(th), r, withAlpha(tokSurfaceRaised, alpha))
 		}
 		return rectF{x: tx, y: ty, w: tw, h: th}
 	}
@@ -867,30 +858,29 @@ func (ov *overview) tileImageRect(i int) rectF {
 	return r
 }
 
-// drawTileBorder highlights the selection (rainbow), the slide the overview
-// was opened from (grey) and the hovered tile (white), flush with the image.
+// drawTileBorder marks the selection (a focus ring, offset from the image),
+// the slide the overview was opened from (line-control) and the hovered
+// tile (ink-faint). The selection wins when a tile is several of these.
 func (ov *overview) drawTileBorder(screen *ebiten.Image, i int, r rectF) {
 	n := len(ov.pageList)
 	if i < 0 || i >= n || r.w < 1 || r.h < 1 {
 		return
 	}
+	u := uiUnit(ov.bufW, ov.bufH)
+	bw := max(2, math.Round(1.5*u))
 	switch {
-	case i == ov.selIdx && i != ov.fromIdx:
-		gradT := float32(0)
-		if n > 1 {
-			gradT = float32(i) / float32(n-1)
-		}
-		drawOverviewBorder(screen, r, 2, rainbowAt(gradT, 255))
+	case i == ov.selIdx:
+		// 2 px focus ring, offset 2 px, as on every focusable element.
+		o := 2 * bw
+		strokeRoundRect(screen, float32(r.x-o), float32(r.y-o), float32(r.w+2*o), float32(r.h+2*o),
+			float32(radiusXS*u), float32(bw), tokFocus)
 	case i == ov.fromIdx:
-		drawOverviewBorder(screen, r, 2, color.RGBA{180, 180, 180, 160})
+		drawOverviewBorder(screen, r, bw, tokLineControl)
 	case i == ov.hoverIdx:
-		drawOverviewBorder(screen, r, 1, color.RGBA{255, 255, 255, 120})
+		drawOverviewBorder(screen, r, max(1, math.Round(0.75*u)), tokInkFaint)
 	}
 }
 
 func drawOverviewBorder(screen *ebiten.Image, r rectF, bw float64, c color.Color) {
-	vector.FillRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(bw), c, false)
-	vector.FillRect(screen, float32(r.x), float32(r.y+r.h-bw), float32(r.w), float32(bw), c, false)
-	vector.FillRect(screen, float32(r.x), float32(r.y), float32(bw), float32(r.h), c, false)
-	vector.FillRect(screen, float32(r.x+r.w-bw), float32(r.y), float32(bw), float32(r.h), c, false)
+	vector.StrokeRect(screen, float32(r.x+bw/2), float32(r.y+bw/2), float32(r.w-bw), float32(r.h-bw), float32(bw), c, false)
 }

@@ -68,6 +68,16 @@ func (a *Auto) Rate() float64 {
 	return 1 / a.currentDur.Seconds()
 }
 
+// Duration returns the length of the current page's interval, or 0 when
+// auto-advance is inactive or has not been armed yet. It keeps its value
+// while paused, so callers can show the time that was left.
+func (a *Auto) Duration() time.Duration {
+	if !a.IsActive() {
+		return 0
+	}
+	return a.currentDur
+}
+
 // ShouldAdvance returns true once per scheduled interval. The caller is
 // responsible for calling Reset(newPage) after acting on a true result.
 func (a *Auto) ShouldAdvance() bool {

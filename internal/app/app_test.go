@@ -3,14 +3,17 @@ package app
 import (
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/ipc"
@@ -397,26 +400,32 @@ func TestPresenterLayoutGivesNotesAThird(t *testing.T) {
 			}
 		}
 
-		st := layoutPresenterStatus(lo.statusPanel)
+		u := uiUnit(bufW, bufH)
+		st := layoutPresenterStatus(lo.statusPanel, u)
 		for n, r := range map[string]presenterRect{"clock": st.clock, "slide": st.slide, "elapsed": st.elapsed, "bar": st.bar} {
 			if !rectInside(r, lo.statusPanel) {
 				t.Errorf("%s: status %s %+v outside status panel %+v", name, n, r, lo.statusPanel)
 			}
 		}
-		if s := statusValueScale(st.clock, 8, debugGlyphW, 3); s < 2 {
-			t.Errorf("%s: clock value scale %d, want >= 2 (card %+v)", name, s, st.clock)
+		if s := statusValueSize(st.clock, "15:04:05", statusClockMaxPx*u, u); s < 14 {
+			t.Errorf("%s: clock value size %.0f px, want >= 14 (card %+v)", name, s, st.clock)
 		}
-		if s := statusValueScale(st.elapsed, 8, gradientGlyphW, 5); s < 1 {
-			t.Errorf("%s: elapsed value does not fit (card %+v)", name, st.elapsed)
+		if s := statusValueSize(st.elapsed, "00:04:12", statusElapsedMaxPx*u, u); s < 14 {
+			t.Errorf("%s: elapsed value size %.0f px, want >= 14 (card %+v)", name, s, st.elapsed)
 		}
 	}
 
-	st := layoutPresenterStatus((&PresenterGame{bufW: 1920, bufH: 1080}).presenterLayout().statusPanel)
-	if got := statusValueScale(st.elapsed, 8, gradientGlyphW, 5); got != 5 {
-		t.Errorf("1080p elapsed scale = %d, want 5", got)
+	// At 1080p the elapsed time is the biggest number, and both read from
+	// a distance.
+	u := uiUnit(1920, 1080)
+	st := layoutPresenterStatus((&PresenterGame{bufW: 1920, bufH: 1080}).presenterLayout().statusPanel, u)
+	clock := statusValueSize(st.clock, "15:04:05", statusClockMaxPx*u, u)
+	elapsed := statusValueSize(st.elapsed, "00:04:12", statusElapsedMaxPx*u, u)
+	if clock < 30 || elapsed <= clock {
+		t.Errorf("1080p value sizes: clock %.0f px, elapsed %.0f px; want clock >= 30 and elapsed larger", clock, elapsed)
 	}
-	if got := statusValueScale(st.clock, 8, debugGlyphW, 3); got != 3 {
-		t.Errorf("1080p clock scale = %d, want 3", got)
+	if _, ok := statusRingBox(st.elapsed, u); !ok {
+		t.Errorf("1080p elapsed card %+v has no room for the countdown ring", st.elapsed)
 	}
 }
 
@@ -430,40 +439,41 @@ func rectInside(r, outer presenterRect) bool {
 
 func TestNotesLayoutFit(t *testing.T) {
 	var n notesLayout
-	const w, h = 1200, 300 // 66 chars x 6 lines at scale 3; 100 x 10 at scale 2
+	const w, h = 1200, 300
+	const minPx, maxPx = 20.0, 40.0
 
-	lines, scale := n.fit("Short note.", w, h, 3)
-	if scale != 3 || len(lines) != 1 {
-		t.Fatalf("short note: scale %d, %d lines; want scale 3, 1 line", scale, len(lines))
+	lines, size := n.fit("Short note.", w, h, minPx, maxPx)
+	if size != maxPx || len(lines) != 1 {
+		t.Fatalf("short note: size %.0f, %d lines; want %.0f, 1 line", size, len(lines), maxPx)
 	}
-	again, _ := n.fit("Short note.", w, h, 3)
+	again, _ := n.fit("Short note.", w, h, minPx, maxPx)
 	if &again[0] != &lines[0] {
 		t.Fatal("fit with unchanged inputs should reuse the cached lines")
 	}
 
-	// 8 lines: too many at scale 3 (6 fit), fine at scale 2 (10 fit).
+	// 8 lines: 60 px lines at 40 px (5 fit), so it shrinks, but 30 px lines
+	// at 20 px fit 10, so it doesn't need the minimum.
 	medium := strings.Repeat("line\n", 7) + "line"
-	if _, scale := n.fit(medium, w, h, 3); scale != 2 {
-		t.Fatalf("medium note: scale %d, want 2", scale)
+	if _, size := n.fit(medium, w, h, minPx, maxPx); size >= maxPx || size <= minPx {
+		t.Fatalf("medium note: size %.0f, want between %.0f and %.0f", size, minPx, maxPx)
+	} else if 8*math.Round(size*notesLineSpacing) > h {
+		t.Fatalf("medium note: 8 lines at %.0f px don't fit %d px", size, h)
 	}
 
-	// 30 lines never fit: scale 2 with every line, caller truncates.
+	// 30 lines never fit: minimum size with every line, caller truncates.
 	long := strings.Repeat("line\n", 29) + "line"
-	lines, scale = n.fit(long, w, h, 3)
-	if scale != notesMinScale || len(lines) != 30 {
-		t.Fatalf("long note: scale %d, %d lines; want %d, 30", scale, len(lines), notesMinScale)
+	lines, size = n.fit(long, w, h, minPx, maxPx)
+	if size != minPx || len(lines) != 30 {
+		t.Fatalf("long note: size %.0f, %d lines; want %.0f, 30", size, len(lines), minPx)
 	}
 
-	// A higher max scale (HiDPI) is tried first.
-	if _, scale := n.fit("Short note.", w, h, 6); scale != 6 {
-		t.Fatalf("hidpi short note: scale %d, want 6", scale)
-	}
-
-	// Lines never exceed the text scratch buffer, however wide the area.
-	lines, _ = n.fit(strings.Repeat("x", 500), 100000, 100000, 2)
+	// Wrapped lines never exceed the width, whatever the script.
+	mixed := strings.Repeat("Größe ändern \u4e2d\u6587\u6587\u672c \u201cquoted\u201d \u2014 ", 20)
+	lines, size = n.fit(mixed, 400, 100000, minPx, maxPx)
+	f := styleNotes.faceAt(size)
 	for _, l := range lines {
-		if len(l)*debugGlyphW > textBufWidth {
-			t.Fatalf("line of %d chars overflows the %d px text buffer", len(l), textBufWidth)
+		if w := text.Advance(l, f); w > 400 {
+			t.Fatalf("line %q is %.0f px wide, want <= 400", l, w)
 		}
 	}
 }
@@ -664,8 +674,9 @@ func TestTransitionAndElapsedHelpers(t *testing.T) {
 	}
 }
 
-func TestWrapPresenterLinesIsRuneAware(t *testing.T) {
-	got := wrapPresenterLines("Größe ändern\n\nÜberlänge-ohne-Leerzeichen", 6)
+func TestWrapTextIsRuneAware(t *testing.T) {
+	perRune := func(s string) float64 { return float64(utf8.RuneCountInString(s)) }
+	got := wrapText("Größe ändern\n\nÜberlänge-ohne-Leerzeichen", 6, perRune)
 	want := []string{"Größe", "ändern", "", "Überlä", "nge-oh", "ne-Lee", "rzeich", "en"}
 	if len(got) != len(want) {
 		t.Fatalf("wrap = %q, want %q", got, want)
@@ -674,16 +685,6 @@ func TestWrapPresenterLinesIsRuneAware(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("wrap = %q, want %q", got, want)
 		}
-	}
-}
-
-func TestDebugFontTextFoldsTypography(t *testing.T) {
-	in := "Größe \u2013 \u201cquoted\u201d \u2026 \u2022 5\u20ac \u4e2d"
-	if got, want := debugFontText(in), `Größe - "quoted" ... * 5EUR ?`; got != want {
-		t.Fatalf("debugFontText = %q, want %q", got, want)
-	}
-	if s := "plain Ä text"; debugFontText(s) != s {
-		t.Fatal("Latin-1 text should pass through unchanged")
 	}
 }
 

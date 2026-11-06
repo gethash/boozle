@@ -3,29 +3,20 @@ package app
 import (
 	"errors"
 	"fmt"
-	"image"
 	"image/color"
+	"math"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
-	"github.com/hajimehoshi/ebiten/v2/vector"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 
 	"github.com/gethash/boozle/internal/display"
 	"github.com/gethash/boozle/internal/ipc"
 	"github.com/gethash/boozle/internal/pdf"
-)
-
-var (
-	colorLabel = color.RGBA{148, 163, 184, 255}
-	colorValue = color.RGBA{248, 250, 252, 255}
-	colorDim   = color.RGBA{100, 116, 139, 255}
-	colorNotes = color.RGBA{226, 232, 240, 255}
 )
 
 // PresenterOptions configures the presenter-view subprocess. CacheMB and
@@ -57,10 +48,12 @@ type PresenterGame struct {
 	curWanted   pdf.CacheKey
 	prefetchFor presenterPrefetchSig
 
-	counterCache pageLabelCache
-	elapsedCache elapsedCache
-	clockCache   clockCache
-	notes        notesLayout
+	counterCache   pageLabelCache
+	elapsedCache   elapsedCache
+	clockCache     clockCache
+	countdownCache countdownCache
+	notes          notesLayout
+	statusBar      segmentedBar
 
 	ov     overview
 	redraw redrawGate[presenterFrame]
@@ -319,22 +312,18 @@ func (g *PresenterGame) Draw(screen *ebiten.Image) {
 	if !g.redraw.needed(g.frame(st, recvAt, seq, now), now) {
 		return
 	}
-	resetTextPool()
-	screen.Fill(color.RGBA{13, 15, 26, 255}) // #0D0F1A
+	screen.Fill(tokGround)
 
 	if g.bufW <= 0 || g.bufH <= 0 {
 		return
 	}
 
 	lo := g.presenterLayout()
-	drawPresenterPanel(screen, lo.currentPanel)
-	drawPresenterPanel(screen, lo.nextPanel)
-	drawPresenterPanel(screen, lo.notesPanel)
-	drawPresenterPanel(screen, lo.statusPanel)
-
-	drawPresenterText(screen, "CURRENT", lo.currentPanel.x+18, lo.currentPanel.y+14, 2, colorLabel)
-	drawPresenterText(screen, "NEXT", lo.nextPanel.x+18, lo.nextPanel.y+14, 2, colorLabel)
-	drawPresenterText(screen, "NOTES", lo.notesPanel.x+18, lo.notesPanel.y+14, 2, colorLabel)
+	u := uiUnit(g.bufW, g.bufH)
+	drawLabelledPanel(screen, lo.currentPanel, "Current", u)
+	drawLabelledPanel(screen, lo.nextPanel, "Next", u)
+	drawLabelledPanel(screen, lo.notesPanel, "Notes", u)
+	drawPanel(screen, lo.statusPanel, u)
 
 	drawImageInPresenterRect(screen, g.cur.img, lo.currentContent)
 	drawImageInPresenterRect(screen, g.next.img, lo.nextContent)
@@ -413,15 +402,24 @@ func (g *PresenterGame) presenterLayout() presenterLayout {
 	notesPanel := presenterRect{x: margin, y: bottomY, w: leftW, h: bottomH}
 	statusPanel := presenterRect{x: nextPanel.x, y: bottomY, w: rightW, h: bottomH}
 
+	pad, head := panelInsets(uiUnit(g.bufW, g.bufH))
 	return presenterLayout{
 		currentPanel:   currentPanel,
-		currentContent: insetPresenterRect(currentPanel, 16, 44, 16, 16),
+		currentContent: insetPresenterRect(currentPanel, pad, head, pad, pad),
 		nextPanel:      nextPanel,
-		nextContent:    insetPresenterRect(nextPanel, 14, 44, 14, 14),
+		nextContent:    insetPresenterRect(nextPanel, pad, head, pad, pad),
 		notesPanel:     notesPanel,
-		notesContent:   insetPresenterRect(notesPanel, 18, 44, 18, 14),
+		notesContent:   insetPresenterRect(notesPanel, pad, head, pad, pad),
 		statusPanel:    statusPanel,
 	}
+}
+
+// panelInsets returns a labelled panel's content padding and the top inset
+// that leaves room for its eyebrow label, in buffer pixels.
+func panelInsets(u float64) (pad, head int) {
+	pad = int(math.Round(space3 * u))
+	head = int(math.Round((space3 + eyebrowLineH + space2) * u))
+	return pad, head
 }
 
 func insetPresenterRect(r presenterRect, left, top, right, bottom int) presenterRect {
@@ -495,17 +493,20 @@ func (g *PresenterGame) forwardInput() {
 	}
 }
 
-func drawPresenterPanel(screen *ebiten.Image, r presenterRect) {
-	if r.w <= 0 || r.h <= 0 {
-		return
-	}
-	vector.FillRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h),
-		color.RGBA{15, 19, 32, 255}, false)
-	c := color.RGBA{63, 72, 95, 180}
-	vector.FillRect(screen, float32(r.x), float32(r.y), float32(r.w), 1, c, false)
-	vector.FillRect(screen, float32(r.x), float32(r.y+r.h-1), float32(r.w), 1, c, false)
-	vector.FillRect(screen, float32(r.x), float32(r.y), 1, float32(r.h), c, false)
-	vector.FillRect(screen, float32(r.x+r.w-1), float32(r.y), 1, float32(r.h), c, false)
+// eyebrowLineH is the eyebrow style's line height in design pixels.
+const eyebrowLineH = 16
+
+// drawEyebrow draws an uppercase eyebrow label with its top-left at (x, y).
+func drawEyebrow(dst *ebiten.Image, s string, x, y, u float64, clr color.Color) {
+	drawStyled(dst, strings.ToUpper(s), styleEyebrow, u, x, y, text.AlignStart, text.AlignStart, clr)
+}
+
+// drawLabelledPanel draws a panel with an eyebrow label in its top-left
+// corner, aligned with the panel's content inset.
+func drawLabelledPanel(dst *ebiten.Image, r presenterRect, label string, u float64) {
+	drawPanel(dst, r, u)
+	pad, _ := panelInsets(u)
+	drawEyebrow(dst, label, float64(r.x+pad), float64(r.y+pad), u, tokInkFaint)
 }
 
 func drawImageInPresenterRect(screen, img *ebiten.Image, r presenterRect) {
@@ -525,23 +526,25 @@ func drawImageInPresenterRect(screen, img *ebiten.Image, r presenterRect) {
 	screen.DrawImage(img, op)
 }
 
+// Largest value sizes in design pixels: the clock and slide counter, and
+// the elapsed time (the presenter's main number).
+const (
+	statusClockMaxPx   = 30
+	statusElapsedMaxPx = 52
+	statusValueMinPx   = 18 // two card rows need room for at least this
+)
+
 func (g *PresenterGame) drawPresenterStatus(screen *ebiten.Image, r presenterRect, st ipc.PresenterState, recvAt, now time.Time) {
 	if r.w <= 0 || r.h <= 0 {
 		return
 	}
-	lo := layoutPresenterStatus(r)
-
-	drawPresenterPanel(screen, lo.clock)
-	drawPresenterPanel(screen, lo.slide)
-	drawPresenterPanel(screen, lo.elapsed)
+	u := uiUnit(g.bufW, g.bufH)
+	lo := layoutPresenterStatus(r, u)
 
 	total := len(g.hello.PageList)
 	counter := "-- / --"
-	counterChars := len(counter)
 	if g.hasHello && total > 0 {
 		counter = g.counterCache.String(st.ListIndex, total)
-		// Size for the widest counter so the text doesn't jump on 9 → 10.
-		counterChars = 2*len(strconv.Itoa(total)) + 3
 	}
 	elapsed := int64(0)
 	if g.hasHello {
@@ -550,32 +553,33 @@ func (g *PresenterGame) drawPresenterStatus(screen *ebiten.Image, r presenterRec
 	clock := g.clockCache.String(now)
 	elapsedStr := g.elapsedCache.String(elapsed)
 
-	drawStatusCard(screen, lo.clock, "CLOCK", clock, statusValueScale(lo.clock, len(clock), debugGlyphW, 3), colorValue)
-	drawStatusCard(screen, lo.slide, "SLIDE", counter, statusValueScale(lo.slide, counterChars, debugGlyphW, 3), colorValue)
-	drawPresenterText(screen, "ELAPSED", lo.elapsed.x+statusCardPadX, lo.elapsed.y+statusLabelY, 2, colorLabel)
-	if s := statusValueScale(lo.elapsed, len(elapsedStr), gradientGlyphW, 5); s > 0 {
-		drawPresenterGradientText(screen, elapsedStr, lo.elapsed.x+statusCardPadX, lo.elapsed.y+statusValueY, s)
-	}
+	drawStatusCard(screen, lo.clock, "Clock", clock, statusClockMaxPx*u, u)
+	drawStatusCard(screen, lo.slide, "Slide", counter, statusClockMaxPx*u, u)
 
-	status := "TIMER"
-	if st.Paused {
-		status = "PAUSED"
+	// Elapsed time, with the current slide's countdown ring on the right
+	// while auto-advance runs.
+	e := lo.elapsed
+	fillRoundRect(screen, float32(e.x), float32(e.y), float32(e.w), float32(e.h), float32(radiusSM*u), tokSurfaceRaised)
+	if st.SlideSeconds > 0 {
+		if ring, ok := statusRingBox(lo.elapsed, u); ok {
+			remaining := st.RemainingAt(recvAt, now)
+			drawStatusRing(screen, ring, g.countdownCache.String(remaining), remaining.Seconds()/st.SlideSeconds, st.Paused)
+			e.w = max(1, int(ring.x-space3*u)-e.x)
+		}
 	}
-	drawPresenterText(screen, status, lo.bar.x, lo.barLabelY, 2, colorLabel)
-	drawSegmentedProgress(screen, float32(lo.bar.x), float32(lo.bar.y), float32(lo.bar.w), float32(lo.bar.h),
-		total, st.ListIndex, st.FractionAt(recvAt, now), st.Paused)
+	drawStatusCardContent(screen, e, "Elapsed", elapsedStr, statusElapsedMaxPx*u, u)
+
+	label, clr := "Progress", color.Color(tokInkFaint)
+	switch {
+	case st.Paused:
+		label, clr = "Paused", tokWarning
+	case st.SlideSeconds > 0:
+		label = "Timer"
+	}
+	drawEyebrow(screen, label, float64(lo.bar.x), float64(lo.barLabelY), u, clr)
+	g.statusBar.draw(screen, lo.bar.x, lo.bar.y, lo.bar.w, lo.bar.h,
+		total, st.ListIndex, st.FractionAt(recvAt, now), st.Paused, tokTrack, float32(max(2, math.Round(space1*u))))
 }
-
-// Status card text placement: label at the top, value below it.
-const (
-	statusCardPadX   = 16
-	statusLabelY     = 14
-	statusValueY     = 42
-	statusValueBotPd = 8  // space below the value's glyphs
-	statusGlyphH     = 12 // visible debug-font glyph height at scale 1
-	gradientGlyphW   = 7  // drawPresenterGradientText advance at scale 1
-	statusBarLabelH  = 32 // progress label (scale 2) plus spacing above the bar
-)
 
 // presenterStatusLayout places the clock, slide and elapsed cards and the
 // progress bar inside the status panel.
@@ -585,25 +589,31 @@ type presenterStatusLayout struct {
 	bar                   presenterRect
 }
 
+// statusCardMinH is the card height that fits a label and a value of
+// statusValueMinPx.
+func statusCardMinH(u float64) int {
+	return int(math.Ceil((2*space3 + eyebrowLineH + space1 + statusValueMinPx*0.75*capsHeightRatio) * u))
+}
+
 // layoutPresenterStatus lays out the status panel: CLOCK | SLIDE cards over
 // a wide ELAPSED card, then the progress bar. When the panel is too short
 // for two rows of cards (small windows, --render-scale), the three cards
 // share one row.
-func layoutPresenterStatus(r presenterRect) presenterStatusLayout {
-	pad := max(14, min(r.w, r.h)/18)
-	gap := max(10, pad/2)
+func layoutPresenterStatus(r presenterRect, u float64) presenterStatusLayout {
+	px := func(v float64) int { return int(math.Round(v * u)) }
+	pad, gap := px(space4), px(space3)
 	innerX, innerY := r.x+pad, r.y+pad
 	innerW := max(1, r.w-pad*2)
 	innerH := max(1, r.h-pad*2)
 
-	barH := max(10, min(18, r.h/24))
-	progressH := statusBarLabelH + barH
-	avail := max(1, innerH-progressH-gap)
+	barH := max(4, px(6))
+	labelH, labelGap := px(eyebrowLineH), px(space2)
+	avail := max(1, innerH-labelH-labelGap-barH-gap)
 
 	var lo presenterStatusLayout
-	twoRowMin := 2*statusCardMinH(2) + gap
-	if avail >= twoRowMin {
-		cardH := max(statusCardMinH(2), (avail-gap)*2/5)
+	cardMin := statusCardMinH(u)
+	if avail >= 2*cardMin+gap {
+		cardH := max(cardMin, (avail-gap)*9/20)
 		halfW := max(1, (innerW-gap)/2)
 		lo.clock = presenterRect{x: innerX, y: innerY, w: halfW, h: cardH}
 		lo.slide = presenterRect{x: innerX + halfW + gap, y: innerY, w: max(1, innerW-halfW-gap), h: cardH}
@@ -615,201 +625,164 @@ func layoutPresenterStatus(r presenterRect) presenterStatusLayout {
 		lo.elapsed = presenterRect{x: innerX + 2*(w+gap), y: innerY, w: max(1, innerW-2*(w+gap)), h: avail}
 	}
 	lo.barLabelY = innerY + avail + gap
-	lo.bar = presenterRect{x: innerX, y: lo.barLabelY + statusBarLabelH, w: innerW, h: barH}
+	lo.bar = presenterRect{x: innerX, y: lo.barLabelY + labelH + labelGap, w: innerW, h: barH}
 	return lo
 }
 
-// statusCardMinH is the card height needed to show a value at scale s.
-func statusCardMinH(s int) int {
-	return statusValueY + statusGlyphH*s + statusValueBotPd
+// statusValueBox is the area below a card's label that its value fills.
+func statusValueBox(r presenterRect, u float64) rectF {
+	padX, padY := space4*u, space3*u
+	top := padY + (eyebrowLineH+space1)*u
+	return rectF{
+		x: float64(r.x) + padX,
+		y: float64(r.y) + top,
+		w: max(0, float64(r.w)-2*padX),
+		h: max(0, float64(r.h)-top-padY),
+	}
 }
 
-// statusValueScale returns the largest scale ≤ maxScale at which a value of
-// chars glyphs (advance px each at scale 1) fits card r, or 0 if none does.
-func statusValueScale(r presenterRect, chars, advance, maxScale int) int {
-	for s := maxScale; s >= 1; s-- {
-		if r.h >= statusCardMinH(s) && 2*statusCardPadX+chars*advance*s <= r.w {
-			return s
-		}
-	}
-	return 0
+// statusValueSize is the timer-style text size, at most maxPx, at which
+// value fills card r's value box.
+func statusValueSize(r presenterRect, value string, maxPx, u float64) float64 {
+	b := statusValueBox(r, u)
+	return fitTextSize(value, styleTimer, b.w, b.h, maxPx)
 }
 
-func drawStatusCard(screen *ebiten.Image, r presenterRect, label, value string, scale int, clr color.Color) {
-	drawPresenterText(screen, label, r.x+statusCardPadX, r.y+statusLabelY, 2, colorLabel)
-	if scale > 0 {
-		drawPresenterText(screen, value, r.x+statusCardPadX, r.y+statusValueY, scale, clr)
+func drawStatusCard(dst *ebiten.Image, r presenterRect, label, value string, maxPx, u float64) {
+	fillRoundRect(dst, float32(r.x), float32(r.y), float32(r.w), float32(r.h), float32(radiusSM*u), tokSurfaceRaised)
+	drawStatusCardContent(dst, r, label, value, maxPx, u)
+}
+
+// drawStatusCardContent draws a card's eyebrow label and its value, sized
+// to fit and centred vertically in the value box.
+func drawStatusCardContent(dst *ebiten.Image, r presenterRect, label, value string, maxPx, u float64) {
+	drawEyebrow(dst, label, float64(r.x)+space4*u, float64(r.y)+space3*u, u, tokInkFaint)
+	size := statusValueSize(r, value, maxPx, u)
+	if size < 6 {
+		return
 	}
+	b := statusValueBox(r, u)
+	f := styleTimer.faceAt(size)
+	drawCapsCentred(dst, value, f, b.x, b.y+b.h/2, text.AlignStart, styleTimer.trackingPx(f), tokInk)
+}
+
+// statusRingBox is where the countdown ring sits in the elapsed card: a
+// square at its right edge, or false when the card is too small for one.
+func statusRingBox(card presenterRect, u float64) (rectF, bool) {
+	pad := space3 * u
+	d := math.Floor(min(float64(card.h)-2*pad, float64(card.w)*0.4))
+	if d < 40*u {
+		return rectF{}, false
+	}
+	return rectF{
+		x: float64(card.x+card.w) - space4*u - d,
+		y: float64(card.y) + (float64(card.h)-d)/2,
+		w: d, h: d,
+	}, true
+}
+
+// drawStatusRing draws the countdown ring in box with the remaining time in
+// its centre.
+func drawStatusRing(dst *ebiten.Image, box rectF, label string, remaining float64, paused bool) {
+	d := box.w
+	width := max(3, math.Round(d*0.07))
+	cx, cy := box.x+d/2, box.y+d/2
+	drawCountdownRing(dst, float32(cx), float32(cy), float32(d), float32(width), remaining)
+	inner := d - 2*width
+	size := fitTextSize(label, styleTimer, inner*0.72, inner*0.4, d*0.24)
+	if size < 6 {
+		return
+	}
+	clr := color.Color(tokInk)
+	if paused {
+		clr = tokWarning
+	}
+	f := styleTimer.faceAt(size)
+	drawCapsCentred(dst, label, f, cx, cy, text.AlignCenter, styleTimer.trackingPx(f), clr)
 }
 
 // drawNotesPanel draws the current slide's speaker notes into r, or a dim
 // placeholder when the slide has none.
 func (g *PresenterGame) drawNotesPanel(screen *ebiten.Image, r presenterRect, st ipc.PresenterState) {
+	u := uiUnit(g.bufW, g.bufH)
 	notes := g.hello.Notes[st.Page+1]
 	if strings.TrimSpace(notes) == "" {
 		if g.hasHello {
-			drawPresenterText(screen, "No notes for this slide", r.x, r.y, 2, colorDim)
+			minPx, _ := notesSizeRange(u)
+			drawText(screen, "No notes for this slide", styleNotes.faceAt(minPx), float64(r.x), float64(r.y),
+				text.AlignStart, text.AlignStart, 0, tokInkFaint)
 		}
 		return
 	}
-	g.drawNotes(screen, notes, r, colorNotes)
+	g.drawNotes(screen, notes, r, u)
 }
 
-// ── text rendering ─────────────────────────────────────────────────────
-//
-// Per-frame pool of small DebugPrintAt scratch images. resetTextPool()
-// is called at the top of Draw; each drawPresenterText acquires a fresh
-// buffer so sequential calls can't trample each other's pixels before
-// Ebiten flushes (subsequent writes to a source image after a queued
-// DrawImage can otherwise be reordered visibly).
-var textPoolBufs []*ebiten.Image
-var textPoolNext int
+// notesLineSpacing is the notes' line height as a multiple of the text size.
+const notesLineSpacing = 1.5
 
-const (
-	textBufWidth  = 1024
-	textBufHeight = 13
-	debugGlyphW   = 6 // ebitenutil debug font advance
-)
-
-func resetTextPool() { textPoolNext = 0 }
-
-func acquireTextBuf() *ebiten.Image {
-	for textPoolNext >= len(textPoolBufs) {
-		textPoolBufs = append(textPoolBufs, ebiten.NewImage(textBufWidth, textBufHeight))
-	}
-	b := textPoolBufs[textPoolNext]
-	textPoolNext++
-	b.Clear()
-	return b
+// notesSizeRange is the range of notes text sizes in buffer pixels: body-s
+// as the floor, larger when the notes are short enough.
+func notesSizeRange(u float64) (minPx, maxPx float64) {
+	return math.Round(styleNotes.size * u), math.Round(26 * u)
 }
 
-// drawPresenterText renders s into a pooled scratch image using DebugPrintAt,
-// then blits it to screen at (x, y) scaled by scale× and tinted.
-func drawPresenterText(screen *ebiten.Image, s string, x, y, scale int, clr color.Color) {
-	if s == "" || scale <= 0 {
-		return
-	}
-	width := min(textBufWidth, utf8.RuneCountInString(s)*debugGlyphW+2)
-	buf := acquireTextBuf()
-	ebitenutil.DebugPrintAt(buf, s, 0, 0)
-	src := buf.SubImage(image.Rect(0, 0, width, textBufHeight)).(*ebiten.Image)
-	op := &ebiten.DrawImageOptions{}
-	op.GeoM.Scale(float64(scale), float64(scale))
-	op.GeoM.Translate(float64(x), float64(y))
-	op.ColorScale.ScaleWithColor(clr)
-	screen.DrawImage(src, op)
-}
-
-const (
-	notesMinScale = 2
-	notesLineH    = 15 // line height per scale unit
-)
-
-// notesMaxScale is the largest text scale tried for notes: 3 on a 1080p
-// buffer, growing with the buffer height so HiDPI and 4K panels get text
-// of similar physical size.
-func notesMaxScale(bufH int) int {
-	return max(3, bufH/360)
-}
-
-// notesLayout caches the wrapped lines and chosen text scale of the current
+// notesLayout caches the wrapped lines and chosen text size of the current
 // speaker notes, so fitting only reruns when the note or the area changes.
 type notesLayout struct {
-	text           string
-	w, h, maxScale int
-	scale          int
-	lines          []string
+	text         string
+	w, h         int
+	minPx, maxPx float64
+	size         float64
+	lines        []string
 }
 
-// fit picks the largest scale in [notesMinScale, maxScale] at which text,
-// wrapped to width w, fits height h, and returns the wrapped lines. When
-// it doesn't fit even at notesMinScale, the lines at that scale are
-// returned and the caller truncates.
-func (n *notesLayout) fit(text string, w, h, maxScale int) ([]string, int) {
-	if n.lines != nil && n.text == text && n.w == w && n.h == h && n.maxScale == maxScale {
-		return n.lines, n.scale
+// fit picks the largest size in [minPx, maxPx] at which text, wrapped to
+// width w, fits height h, and returns the wrapped lines. When it doesn't
+// fit even at minPx, the lines at that size are returned and the caller
+// truncates.
+func (n *notesLayout) fit(s string, w, h int, minPx, maxPx float64) ([]string, float64) {
+	if n.lines != nil && n.text == s && n.w == w && n.h == h && n.minPx == minPx && n.maxPx == maxPx {
+		return n.lines, n.size
 	}
-	n.text, n.w, n.h, n.maxScale = text, w, h, maxScale
-	clean := debugFontText(text)
-	for s := max(maxScale, notesMinScale); s >= notesMinScale; s-- {
-		// Lines are drawn through the textBufWidth scratch buffer.
-		maxChars := max(1, min(w/(debugGlyphW*s), textBufWidth/debugGlyphW-1))
-		n.lines, n.scale = wrapPresenterLines(clean, maxChars), s
-		if len(n.lines)*notesLineH*s <= h {
+	n.text, n.w, n.h, n.minPx, n.maxPx = s, w, h, minPx, maxPx
+	step := max(1, math.Round(minPx/15))
+	for size := max(maxPx, minPx); ; size = max(minPx, size-step) {
+		f := styleNotes.faceAt(size)
+		n.lines = wrapText(s, float64(w), func(t string) float64 { return text.Advance(t, f) })
+		n.size = size
+		if float64(len(n.lines))*math.Round(size*notesLineSpacing) <= float64(h) || size <= minPx {
 			break
 		}
 	}
-	return n.lines, n.scale
+	return n.lines, n.size
 }
 
-func (g *PresenterGame) drawNotes(screen *ebiten.Image, s string, r presenterRect, clr color.Color) {
+func (g *PresenterGame) drawNotes(screen *ebiten.Image, s string, r presenterRect, u float64) {
 	if s == "" || r.w <= 0 || r.h <= 0 {
 		return
 	}
-	lines, scale := g.notes.fit(s, r.w, r.h, notesMaxScale(g.bufH))
-	lineH := notesLineH * scale
-	y, maxY := r.y, r.y+r.h
+	minPx, maxPx := notesSizeRange(u)
+	lines, size := g.notes.fit(s, r.w, r.h, minPx, maxPx)
+	f := styleNotes.faceAt(size)
+	lineH := math.Round(size * notesLineSpacing)
+	y, maxY := float64(r.y), float64(r.y+r.h)
 	for i, line := range lines {
 		if y+lineH > maxY {
 			return
 		}
 		if i < len(lines)-1 && y+2*lineH > maxY {
 			// Last line that fits, more to come: mark the cut.
-			drawPresenterText(screen, "...", r.x, y, scale, clr)
-			return
+			line = "…"
 		}
-		drawPresenterText(screen, line, r.x, y, scale, clr)
+		drawText(screen, line, f, float64(r.x), y, text.AlignStart, text.AlignStart, 0, tokInkMuted)
 		y += lineH
 	}
 }
 
-// debugFontReplacements maps common typographic characters outside the
-// debug font's U+0000–U+00FF range (frequent in imported PowerPoint notes)
-// to ASCII look-alikes.
-var debugFontReplacements = map[rune]string{
-	'\u2018': "'", '\u2019': "'", '\u201a': ",", '\u201b': "'",
-	'\u201c': `"`, '\u201d': `"`, '\u201e': `"`, '\u201f': `"`,
-	'\u2010': "-", '\u2011': "-", '\u2012': "-", '\u2013': "-",
-	'\u2014': "-", '\u2015': "-", '\u2212': "-", '\u2026': "...",
-	'\u2022': "*", '\u2023': ">", '\u25e6': "o", '\u25aa': "*",
-	'\u25cf': "*", '\u20ac': "EUR", '\u2122': "TM", '\u2192': "->",
-	'\u2190': "<-", '\u21d2': "=>", '\u2009': " ", '\u200a': " ",
-	'\u202f': " ", '\u2007': " ", '\u200b': "", '\ufeff': "",
-}
-
-// debugFontText makes s drawable with the debug font: characters in
-// U+0000–U+00FF (which includes German umlauts and most Western European
-// accents) pass through, known typographic characters are replaced, and
-// anything else becomes '?'.
-func debugFontText(s string) string {
-	ok := true
-	for _, r := range s {
-		if r > 0xFF {
-			ok = false
-			break
-		}
-	}
-	if ok {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch rep, known := debugFontReplacements[r]; {
-		case r <= 0xFF:
-			b.WriteRune(r)
-		case known:
-			b.WriteString(rep)
-		default:
-			b.WriteByte('?')
-		}
-	}
-	return b.String()
-}
-
-// wrapPresenterLines word-wraps s to at most maxChars characters (runes)
-// per line, hard-splitting words that are longer than a line.
-func wrapPresenterLines(s string, maxChars int) []string {
+// wrapText word-wraps s so no line is wider than maxW as measured by adv,
+// hard-splitting words that are wider than a line on their own.
+func wrapText(s string, maxW float64, adv func(string) float64) []string {
+	space := adv(" ")
 	var lines []string
 	for _, para := range strings.Split(s, "\n") {
 		words := strings.Fields(para)
@@ -817,27 +790,28 @@ func wrapPresenterLines(s string, maxChars int) []string {
 			lines = append(lines, "")
 			continue
 		}
-		line, lineLen := "", 0
+		line, lineW := "", 0.0
 		for _, word := range words {
-			runes := []rune(word)
-			for len(runes) > maxChars {
+			ww := adv(word)
+			for ww > maxW && utf8.RuneCountInString(word) > 1 {
 				if line != "" {
 					lines = append(lines, line)
-					line, lineLen = "", 0
+					line, lineW = "", 0
 				}
-				lines = append(lines, string(runes[:maxChars]))
-				runes = runes[maxChars:]
+				cut := prefixWithin(word, maxW, adv)
+				lines = append(lines, word[:cut])
+				word = word[cut:]
+				ww = adv(word)
 			}
-			word = string(runes)
 			switch {
 			case line == "":
-				line, lineLen = word, len(runes)
-			case lineLen+1+len(runes) <= maxChars:
+				line, lineW = word, ww
+			case lineW+space+ww <= maxW:
 				line += " " + word
-				lineLen += 1 + len(runes)
+				lineW += space + ww
 			default:
 				lines = append(lines, line)
-				line, lineLen = word, len(runes)
+				line, lineW = word, ww
 			}
 		}
 		if line != "" {
@@ -847,20 +821,16 @@ func wrapPresenterLines(s string, maxChars int) []string {
 	return lines
 }
 
-func drawPresenterGradientText(screen *ebiten.Image, s string, x, y, scale int) {
-	if s == "" || scale <= 0 {
-		return
-	}
-	cursor := x
-	step := 7 * scale
-	denom := max(1, len(s)-1)
-	for i, ch := range s {
-		t := float32(i) / float32(denom)
-		clr := rainbowAt(t, 255)
-		if ch == ':' {
-			clr = colorLabel
+// prefixWithin returns the byte length of the longest prefix of word (at
+// least one rune) no wider than maxW.
+func prefixWithin(word string, maxW float64, adv func(string) float64) int {
+	cut := 0
+	for i, r := range word {
+		end := i + utf8.RuneLen(r)
+		if cut > 0 && adv(word[:end]) > maxW {
+			break
 		}
-		drawPresenterText(screen, string(ch), cursor, y, scale, clr)
-		cursor += step
+		cut = end
 	}
+	return cut
 }

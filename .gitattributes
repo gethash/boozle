@@ -1,3 +1,6 @@
 # Generated PDFs are plain ASCII, so git would treat them as text and convert
 # line endings on Windows checkouts — which breaks their xref byte offsets.
 *.pdf binary
+
+# Embedded fonts.
+*.ttf binary

@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,8 @@ import (
 var (
 	colorLabel = color.RGBA{148, 163, 184, 255}
 	colorValue = color.RGBA{248, 250, 252, 255}
+	colorDim   = color.RGBA{100, 116, 139, 255}
+	colorNotes = color.RGBA{226, 232, 240, 255}
 )
 
 // PresenterOptions configures the presenter-view subprocess. CacheMB and
@@ -38,7 +41,8 @@ type PresenterOptions struct {
 }
 
 // PresenterGame is an ebiten.Game that renders the presenter view: current
-// slide on the left, next-slide preview + timer + clock + notes on the right.
+// slide and next-slide preview on top, speaker notes and clock, slide
+// counter, elapsed time and progress in a bottom row (see presenterLayout).
 type PresenterGame struct {
 	pipe     *pipeline
 	receiver *ipc.Receiver
@@ -325,13 +329,16 @@ func (g *PresenterGame) Draw(screen *ebiten.Image) {
 	lo := g.presenterLayout()
 	drawPresenterPanel(screen, lo.currentPanel)
 	drawPresenterPanel(screen, lo.nextPanel)
+	drawPresenterPanel(screen, lo.notesPanel)
 	drawPresenterPanel(screen, lo.statusPanel)
 
 	drawPresenterText(screen, "CURRENT", lo.currentPanel.x+18, lo.currentPanel.y+14, 2, colorLabel)
 	drawPresenterText(screen, "NEXT", lo.nextPanel.x+18, lo.nextPanel.y+14, 2, colorLabel)
+	drawPresenterText(screen, "NOTES", lo.notesPanel.x+18, lo.notesPanel.y+14, 2, colorLabel)
 
 	drawImageInPresenterRect(screen, g.cur.img, lo.currentContent)
 	drawImageInPresenterRect(screen, g.next.img, lo.nextContent)
+	g.drawNotesPanel(screen, lo.notesContent, st)
 	g.drawPresenterStatus(screen, lo.statusPanel, st, recvAt, now)
 	if g.ov.phase != ovOff {
 		var curRect rectF
@@ -366,44 +373,53 @@ type presenterRect struct {
 	x, y, w, h int
 }
 
+// presenterLayout is the presenter window's grid: current and next slide
+// side by side on top, speaker notes and the status panel (clock, slide
+// counter, elapsed time, progress) below. The bottom row always gets at
+// least a third of the window so notes stay readable.
 type presenterLayout struct {
 	currentPanel   presenterRect
 	currentContent presenterRect
 	nextPanel      presenterRect
 	nextContent    presenterRect
+	notesPanel     presenterRect
+	notesContent   presenterRect
 	statusPanel    presenterRect
 }
+
+const (
+	presenterBottomMinH = 240 // notes/status row floor in pixels
+	presenterRightMinW  = 360 // next/status column floor in pixels
+)
 
 func (g *PresenterGame) presenterLayout() presenterLayout {
 	margin := max(18, min(g.bufW, g.bufH)/52)
 	gap := max(14, margin/2)
-	rightW := int(float64(g.bufW) * 0.31)
-	rightW = max(rightW, 360)
-	rightW = min(rightW, g.bufW/2)
-	leftW := max(1, g.bufW-margin*2-gap-rightW)
+	fullW := max(1, g.bufW-margin*2)
+	fullH := max(1, g.bufH-margin*2)
 
-	fullH := g.bufH - margin*2
-	nextH := int(float64(fullH) * 0.40)
-	nextH = max(nextH, 250)
-	nextH = min(nextH, fullH-gap-220)
-	if nextH < 1 {
-		nextH = max(1, fullH/2)
-	}
+	rightW := int(float64(fullW) * 0.35)
+	rightW = max(rightW, presenterRightMinW)
+	rightW = max(1, min(rightW, fullW/2))
+	leftW := max(1, fullW-gap-rightW)
 
-	currentPanel := presenterRect{x: margin, y: margin, w: leftW, h: fullH}
-	nextPanel := presenterRect{x: margin + leftW + gap, y: margin, w: rightW, h: nextH}
-	statusPanel := presenterRect{
-		x: nextPanel.x,
-		y: nextPanel.y + nextPanel.h + gap,
-		w: rightW,
-		h: fullH - nextPanel.h - gap,
-	}
+	bottomH := max(g.bufH/3, presenterBottomMinH)
+	bottomH = max(1, min(bottomH, fullH/2))
+	topH := max(1, fullH-gap-bottomH)
+
+	currentPanel := presenterRect{x: margin, y: margin, w: leftW, h: topH}
+	nextPanel := presenterRect{x: margin + leftW + gap, y: margin, w: rightW, h: topH}
+	bottomY := margin + topH + gap
+	notesPanel := presenterRect{x: margin, y: bottomY, w: leftW, h: bottomH}
+	statusPanel := presenterRect{x: nextPanel.x, y: bottomY, w: rightW, h: bottomH}
 
 	return presenterLayout{
 		currentPanel:   currentPanel,
 		currentContent: insetPresenterRect(currentPanel, 16, 44, 16, 16),
 		nextPanel:      nextPanel,
 		nextContent:    insetPresenterRect(nextPanel, 14, 44, 14, 14),
+		notesPanel:     notesPanel,
+		notesContent:   insetPresenterRect(notesPanel, 18, 44, 18, 14),
 		statusPanel:    statusPanel,
 	}
 }
@@ -513,55 +529,130 @@ func (g *PresenterGame) drawPresenterStatus(screen *ebiten.Image, r presenterRec
 	if r.w <= 0 || r.h <= 0 {
 		return
 	}
-	pad := max(18, min(r.w, r.h)/18)
-	gap := max(12, pad/2)
-	innerX := r.x + pad
-	innerY := r.y + pad
-	innerW := r.w - pad*2
+	lo := layoutPresenterStatus(r)
 
-	cardH := max(78, r.h/6)
-	halfW := (innerW - gap) / 2
-	clockCard := presenterRect{x: innerX, y: innerY, w: halfW, h: cardH}
-	slideCard := presenterRect{x: innerX + halfW + gap, y: innerY, w: innerW - halfW - gap, h: cardH}
-	timerCard := presenterRect{x: innerX, y: innerY + cardH + gap, w: innerW, h: max(118, r.h/3)}
-
-	drawPresenterPanel(screen, clockCard)
-	drawPresenterPanel(screen, slideCard)
-	drawPresenterPanel(screen, timerCard)
-
-	drawPresenterText(screen, "CLOCK", clockCard.x+16, clockCard.y+14, 2, colorLabel)
-	drawPresenterText(screen, g.clockCache.String(now), clockCard.x+16, clockCard.y+42, 3, colorValue)
+	drawPresenterPanel(screen, lo.clock)
+	drawPresenterPanel(screen, lo.slide)
+	drawPresenterPanel(screen, lo.elapsed)
 
 	total := len(g.hello.PageList)
 	counter := "-- / --"
+	counterChars := len(counter)
 	if g.hasHello && total > 0 {
 		counter = g.counterCache.String(st.ListIndex, total)
+		// Size for the widest counter so the text doesn't jump on 9 → 10.
+		counterChars = 2*len(strconv.Itoa(total)) + 3
 	}
-	drawPresenterText(screen, "SLIDE", slideCard.x+16, slideCard.y+14, 2, colorLabel)
-	drawPresenterText(screen, counter, slideCard.x+16, slideCard.y+42, 3, colorValue)
-
 	elapsed := int64(0)
 	if g.hasHello {
 		elapsed = int64(now.Sub(g.hello.StartedAt).Seconds())
 	}
-	drawPresenterText(screen, "ELAPSED", timerCard.x+18, timerCard.y+16, 2, colorLabel)
-	drawPresenterGradientText(screen, g.elapsedCache.String(elapsed), timerCard.x+18, timerCard.y+50, 5)
+	clock := g.clockCache.String(now)
+	elapsedStr := g.elapsedCache.String(elapsed)
+
+	drawStatusCard(screen, lo.clock, "CLOCK", clock, statusValueScale(lo.clock, len(clock), debugGlyphW, 3), colorValue)
+	drawStatusCard(screen, lo.slide, "SLIDE", counter, statusValueScale(lo.slide, counterChars, debugGlyphW, 3), colorValue)
+	drawPresenterText(screen, "ELAPSED", lo.elapsed.x+statusCardPadX, lo.elapsed.y+statusLabelY, 2, colorLabel)
+	if s := statusValueScale(lo.elapsed, len(elapsedStr), gradientGlyphW, 5); s > 0 {
+		drawPresenterGradientText(screen, elapsedStr, lo.elapsed.x+statusCardPadX, lo.elapsed.y+statusValueY, s)
+	}
 
 	status := "TIMER"
 	if st.Paused {
 		status = "PAUSED"
 	}
-	barLabelY := timerCard.y + timerCard.h + gap + 8
-	drawPresenterText(screen, status, innerX, barLabelY, 2, colorLabel)
-	barY := float32(barLabelY + 32)
-	barH := float32(max(10, min(18, r.h/34)))
-	drawSegmentedProgress(screen, float32(innerX), barY, float32(innerW), barH, total, st.ListIndex, st.FractionAt(recvAt, now), st.Paused)
+	drawPresenterText(screen, status, lo.bar.x, lo.barLabelY, 2, colorLabel)
+	drawSegmentedProgress(screen, float32(lo.bar.x), float32(lo.bar.y), float32(lo.bar.w), float32(lo.bar.h),
+		total, st.ListIndex, st.FractionAt(recvAt, now), st.Paused)
+}
 
-	notesY := int(barY+barH) + gap + 18
-	if notes := g.hello.Notes[st.Page+1]; notes != "" && notesY < r.y+r.h-28 {
-		drawPresenterText(screen, "NOTES", innerX, notesY, 2, colorLabel)
-		g.drawNotes(screen, notes, innerX, notesY+30, innerW, r.y+r.h-pad, 2, color.RGBA{226, 232, 240, 255})
+// Status card text placement: label at the top, value below it.
+const (
+	statusCardPadX   = 16
+	statusLabelY     = 14
+	statusValueY     = 42
+	statusValueBotPd = 8  // space below the value's glyphs
+	statusGlyphH     = 12 // visible debug-font glyph height at scale 1
+	gradientGlyphW   = 7  // drawPresenterGradientText advance at scale 1
+	statusBarLabelH  = 32 // progress label (scale 2) plus spacing above the bar
+)
+
+// presenterStatusLayout places the clock, slide and elapsed cards and the
+// progress bar inside the status panel.
+type presenterStatusLayout struct {
+	clock, slide, elapsed presenterRect
+	barLabelY             int
+	bar                   presenterRect
+}
+
+// layoutPresenterStatus lays out the status panel: CLOCK | SLIDE cards over
+// a wide ELAPSED card, then the progress bar. When the panel is too short
+// for two rows of cards (small windows, --render-scale), the three cards
+// share one row.
+func layoutPresenterStatus(r presenterRect) presenterStatusLayout {
+	pad := max(14, min(r.w, r.h)/18)
+	gap := max(10, pad/2)
+	innerX, innerY := r.x+pad, r.y+pad
+	innerW := max(1, r.w-pad*2)
+	innerH := max(1, r.h-pad*2)
+
+	barH := max(10, min(18, r.h/24))
+	progressH := statusBarLabelH + barH
+	avail := max(1, innerH-progressH-gap)
+
+	var lo presenterStatusLayout
+	twoRowMin := 2*statusCardMinH(2) + gap
+	if avail >= twoRowMin {
+		cardH := max(statusCardMinH(2), (avail-gap)*2/5)
+		halfW := max(1, (innerW-gap)/2)
+		lo.clock = presenterRect{x: innerX, y: innerY, w: halfW, h: cardH}
+		lo.slide = presenterRect{x: innerX + halfW + gap, y: innerY, w: max(1, innerW-halfW-gap), h: cardH}
+		lo.elapsed = presenterRect{x: innerX, y: innerY + cardH + gap, w: innerW, h: max(1, avail-cardH-gap)}
+	} else {
+		w := max(1, (innerW-2*gap)/3)
+		lo.clock = presenterRect{x: innerX, y: innerY, w: w, h: avail}
+		lo.slide = presenterRect{x: innerX + w + gap, y: innerY, w: w, h: avail}
+		lo.elapsed = presenterRect{x: innerX + 2*(w+gap), y: innerY, w: max(1, innerW-2*(w+gap)), h: avail}
 	}
+	lo.barLabelY = innerY + avail + gap
+	lo.bar = presenterRect{x: innerX, y: lo.barLabelY + statusBarLabelH, w: innerW, h: barH}
+	return lo
+}
+
+// statusCardMinH is the card height needed to show a value at scale s.
+func statusCardMinH(s int) int {
+	return statusValueY + statusGlyphH*s + statusValueBotPd
+}
+
+// statusValueScale returns the largest scale ≤ maxScale at which a value of
+// chars glyphs (advance px each at scale 1) fits card r, or 0 if none does.
+func statusValueScale(r presenterRect, chars, advance, maxScale int) int {
+	for s := maxScale; s >= 1; s-- {
+		if r.h >= statusCardMinH(s) && 2*statusCardPadX+chars*advance*s <= r.w {
+			return s
+		}
+	}
+	return 0
+}
+
+func drawStatusCard(screen *ebiten.Image, r presenterRect, label, value string, scale int, clr color.Color) {
+	drawPresenterText(screen, label, r.x+statusCardPadX, r.y+statusLabelY, 2, colorLabel)
+	if scale > 0 {
+		drawPresenterText(screen, value, r.x+statusCardPadX, r.y+statusValueY, scale, clr)
+	}
+}
+
+// drawNotesPanel draws the current slide's speaker notes into r, or a dim
+// placeholder when the slide has none.
+func (g *PresenterGame) drawNotesPanel(screen *ebiten.Image, r presenterRect, st ipc.PresenterState) {
+	notes := g.hello.Notes[st.Page+1]
+	if strings.TrimSpace(notes) == "" {
+		if g.hasHello {
+			drawPresenterText(screen, "No notes for this slide", r.x, r.y, 2, colorDim)
+		}
+		return
+	}
+	g.drawNotes(screen, notes, r, colorNotes)
 }
 
 // ── text rendering ─────────────────────────────────────────────────────
@@ -609,34 +700,65 @@ func drawPresenterText(screen *ebiten.Image, s string, x, y, scale int, clr colo
 	screen.DrawImage(src, op)
 }
 
-// notesLayout caches the wrapped lines of the current speaker notes, so
-// wrapping only reruns when the note or the available width changes.
+const (
+	notesMinScale = 2
+	notesLineH    = 15 // line height per scale unit
+)
+
+// notesMaxScale is the largest text scale tried for notes: 3 on a 1080p
+// buffer, growing with the buffer height so HiDPI and 4K panels get text
+// of similar physical size.
+func notesMaxScale(bufH int) int {
+	return max(3, bufH/360)
+}
+
+// notesLayout caches the wrapped lines and chosen text scale of the current
+// speaker notes, so fitting only reruns when the note or the area changes.
 type notesLayout struct {
-	text     string
-	maxChars int
-	lines    []string
+	text           string
+	w, h, maxScale int
+	scale          int
+	lines          []string
 }
 
-func (n *notesLayout) wrap(text string, maxChars int) []string {
-	if n.lines == nil || n.text != text || n.maxChars != maxChars {
-		n.text, n.maxChars = text, maxChars
-		n.lines = wrapPresenterLines(debugFontText(text), maxChars)
+// fit picks the largest scale in [notesMinScale, maxScale] at which text,
+// wrapped to width w, fits height h, and returns the wrapped lines. When
+// it doesn't fit even at notesMinScale, the lines at that scale are
+// returned and the caller truncates.
+func (n *notesLayout) fit(text string, w, h, maxScale int) ([]string, int) {
+	if n.lines != nil && n.text == text && n.w == w && n.h == h && n.maxScale == maxScale {
+		return n.lines, n.scale
 	}
-	return n.lines
+	n.text, n.w, n.h, n.maxScale = text, w, h, maxScale
+	clean := debugFontText(text)
+	for s := max(maxScale, notesMinScale); s >= notesMinScale; s-- {
+		// Lines are drawn through the textBufWidth scratch buffer.
+		maxChars := max(1, min(w/(debugGlyphW*s), textBufWidth/debugGlyphW-1))
+		n.lines, n.scale = wrapPresenterLines(clean, maxChars), s
+		if len(n.lines)*notesLineH*s <= h {
+			break
+		}
+	}
+	return n.lines, n.scale
 }
 
-func (g *PresenterGame) drawNotes(screen *ebiten.Image, s string, x, y, maxW, maxY, scale int, clr color.Color) {
-	if s == "" || maxW <= 0 || y >= maxY {
+func (g *PresenterGame) drawNotes(screen *ebiten.Image, s string, r presenterRect, clr color.Color) {
+	if s == "" || r.w <= 0 || r.h <= 0 {
 		return
 	}
-	lineH := 15 * scale
-	maxChars := max(1, maxW/(debugGlyphW*scale))
-	for _, line := range g.notes.wrap(s, maxChars) {
+	lines, scale := g.notes.fit(s, r.w, r.h, notesMaxScale(g.bufH))
+	lineH := notesLineH * scale
+	y, maxY := r.y, r.y+r.h
+	for i, line := range lines {
 		if y+lineH > maxY {
-			drawPresenterText(screen, "...", x, y, scale, clr)
 			return
 		}
-		drawPresenterText(screen, line, x, y, scale, clr)
+		if i < len(lines)-1 && y+2*lineH > maxY {
+			// Last line that fits, more to come: mark the cut.
+			drawPresenterText(screen, "...", r.x, y, scale, clr)
+			return
+		}
+		drawPresenterText(screen, line, r.x, y, scale, clr)
 		y += lineH
 	}
 }

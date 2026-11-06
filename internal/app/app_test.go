@@ -1,10 +1,12 @@
 package app
 
 import (
+	"fmt"
 	"image"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,8 +346,9 @@ func TestLayoutHelpers(t *testing.T) {
 	if lo.currentPanel.w <= lo.nextPanel.w {
 		t.Fatalf("presenter current panel width = %d, next = %d; want current wider", lo.currentPanel.w, lo.nextPanel.w)
 	}
-	if lo.statusPanel.y <= lo.nextPanel.y {
-		t.Fatalf("status panel should sit below next panel: next=%+v status=%+v", lo.nextPanel, lo.statusPanel)
+	if lo.notesPanel.y != lo.statusPanel.y || lo.notesPanel.y <= lo.currentPanel.y+lo.currentPanel.h {
+		t.Fatalf("notes and status should share a row below the slides: current=%+v notes=%+v status=%+v",
+			lo.currentPanel, lo.notesPanel, lo.statusPanel)
 	}
 
 	ov := computeOverviewLayout(1920, 1080)
@@ -358,6 +361,110 @@ func TestLayoutHelpers(t *testing.T) {
 	}
 	if cols <= 0 || cellW <= 0 || cellH <= 0 {
 		t.Fatalf("invalid grid cols=%d cell=%fx%f", cols, cellW, cellH)
+	}
+}
+
+func TestPresenterLayoutGivesNotesAThird(t *testing.T) {
+	sizes := [][2]int{{1920, 1080}, {1280, 720}, {3840, 2160}, {1024, 768}, {2560, 1600}, {960, 540}}
+	for _, sz := range sizes {
+		bufW, bufH := sz[0], sz[1]
+		lo := (&PresenterGame{bufW: bufW, bufH: bufH}).presenterLayout()
+		name := fmt.Sprintf("%dx%d", bufW, bufH)
+
+		if lo.notesPanel.h < bufH/3 {
+			fullH := bufH - 2*max(18, min(bufW, bufH)/52)
+			if lo.notesPanel.h < fullH/2 { // only the half-height cap may win
+				t.Errorf("%s: notes height %d < a third of %d", name, lo.notesPanel.h, bufH)
+			}
+		}
+		if lo.notesPanel.w <= lo.statusPanel.w {
+			t.Errorf("%s: notes width %d should exceed status width %d", name, lo.notesPanel.w, lo.statusPanel.w)
+		}
+		if lo.currentPanel.w <= lo.nextPanel.w {
+			t.Errorf("%s: current width %d should exceed next width %d", name, lo.currentPanel.w, lo.nextPanel.w)
+		}
+		panels := map[string]presenterRect{
+			"current": lo.currentPanel, "next": lo.nextPanel, "notes": lo.notesPanel, "status": lo.statusPanel,
+		}
+		for n, r := range panels {
+			if r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.x+r.w > bufW || r.y+r.h > bufH {
+				t.Errorf("%s: %s panel %+v outside %dx%d", name, n, r, bufW, bufH)
+			}
+			for m, o := range panels {
+				if n < m && rectsOverlap(r, o) {
+					t.Errorf("%s: %s %+v overlaps %s %+v", name, n, r, m, o)
+				}
+			}
+		}
+
+		st := layoutPresenterStatus(lo.statusPanel)
+		for n, r := range map[string]presenterRect{"clock": st.clock, "slide": st.slide, "elapsed": st.elapsed, "bar": st.bar} {
+			if !rectInside(r, lo.statusPanel) {
+				t.Errorf("%s: status %s %+v outside status panel %+v", name, n, r, lo.statusPanel)
+			}
+		}
+		if s := statusValueScale(st.clock, 8, debugGlyphW, 3); s < 2 {
+			t.Errorf("%s: clock value scale %d, want >= 2 (card %+v)", name, s, st.clock)
+		}
+		if s := statusValueScale(st.elapsed, 8, gradientGlyphW, 5); s < 1 {
+			t.Errorf("%s: elapsed value does not fit (card %+v)", name, st.elapsed)
+		}
+	}
+
+	st := layoutPresenterStatus((&PresenterGame{bufW: 1920, bufH: 1080}).presenterLayout().statusPanel)
+	if got := statusValueScale(st.elapsed, 8, gradientGlyphW, 5); got != 5 {
+		t.Errorf("1080p elapsed scale = %d, want 5", got)
+	}
+	if got := statusValueScale(st.clock, 8, debugGlyphW, 3); got != 3 {
+		t.Errorf("1080p clock scale = %d, want 3", got)
+	}
+}
+
+func rectsOverlap(a, b presenterRect) bool {
+	return a.x < b.x+b.w && b.x < a.x+a.w && a.y < b.y+b.h && b.y < a.y+a.h
+}
+
+func rectInside(r, outer presenterRect) bool {
+	return r.x >= outer.x && r.y >= outer.y && r.x+r.w <= outer.x+outer.w && r.y+r.h <= outer.y+outer.h
+}
+
+func TestNotesLayoutFit(t *testing.T) {
+	var n notesLayout
+	const w, h = 1200, 300 // 66 chars x 6 lines at scale 3; 100 x 10 at scale 2
+
+	lines, scale := n.fit("Short note.", w, h, 3)
+	if scale != 3 || len(lines) != 1 {
+		t.Fatalf("short note: scale %d, %d lines; want scale 3, 1 line", scale, len(lines))
+	}
+	again, _ := n.fit("Short note.", w, h, 3)
+	if &again[0] != &lines[0] {
+		t.Fatal("fit with unchanged inputs should reuse the cached lines")
+	}
+
+	// 8 lines: too many at scale 3 (6 fit), fine at scale 2 (10 fit).
+	medium := strings.Repeat("line\n", 7) + "line"
+	if _, scale := n.fit(medium, w, h, 3); scale != 2 {
+		t.Fatalf("medium note: scale %d, want 2", scale)
+	}
+
+	// 30 lines never fit: scale 2 with every line, caller truncates.
+	long := strings.Repeat("line\n", 29) + "line"
+	lines, scale = n.fit(long, w, h, 3)
+	if scale != notesMinScale || len(lines) != 30 {
+		t.Fatalf("long note: scale %d, %d lines; want %d, 30", scale, len(lines), notesMinScale)
+	}
+
+	// A higher max scale (HiDPI) is tried first.
+	if _, scale := n.fit("Short note.", w, h, 6); scale != 6 {
+		t.Fatalf("hidpi short note: scale %d, want 6", scale)
+	}
+
+	// Lines never exceed the text scratch buffer, however wide the area.
+	lines, _ = n.fit(strings.Repeat("x", 500), 100000, 100000, 2)
+	for _, l := range lines {
+		if len(l)*debugGlyphW > textBufWidth {
+			t.Fatalf("line of %d chars overflows the %d px text buffer", len(l), textBufWidth)
+		}
 	}
 }
 

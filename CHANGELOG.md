@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-06
+
 ### Changed
 
 - **Boozle design system.** The presenter view, slide overview and progress HUD now follow the Boozle design system used on boozle.io: its dark colour tokens, rounded panels, Geist and Geist Mono type, and the spectrum reserved for time and progress.

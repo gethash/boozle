@@ -21,7 +21,7 @@ import (
 // release because Homebrew builds from the source tarball without ldflags
 // (TestDefaultVersionMatchesChangelog keeps it in sync).
 var (
-	version = "v1.3.1"
+	version = "v1.4.0"
 	commit  = "none"
 	date    = "unknown"
 )

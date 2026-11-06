@@ -80,7 +80,7 @@ The script detects your OS and architecture, downloads the right archive, verifi
 Override the version or install directory with environment variables:
 
 ```bash
-BOOZLE_VERSION=v1.3.1 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.4.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 

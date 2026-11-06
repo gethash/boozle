@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-11-06
+
+### Changed
+
+- **Presenter view: room for speaker notes.** Notes get a dedicated band across the bottom of the presenter window, at least a third of its height, next to a compact clock / slide / elapsed / progress panel; current and next slide sit side by side above it. Notes are drawn as large as they fit (bigger on HiDPI and 4K screens) and only fall back to the old size for long notes.
+
 ## [1.3.0] — 2026-10-14
 
 ### Added

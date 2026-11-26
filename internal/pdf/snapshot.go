@@ -17,9 +17,9 @@ import (
 var ErrChanged = errors.New("pdf changed while it was being read")
 
 // snapshotMaxAge is how old a leftover snapshot (from a crashed run) must be
-// before a later run deletes it. Deleting the snapshot of a deck that is
-// still open is harmless: Unix keeps the open file alive and Windows refuses
-// to delete it.
+// before a later run deletes it (normally there are none: see OpenSnapshot).
+// Deleting the snapshot of a deck that is still open is harmless, as the
+// open handle keeps the file alive.
 const snapshotMaxAge = 24 * time.Hour
 
 var pruneSnapshotsOnce sync.Once
@@ -85,10 +85,11 @@ func OpenSnapshot(path string) (*Doc, os.FileInfo, error) {
 		cleanup()
 		return nil, nil, fmt.Errorf("%s has no pages", path)
 	}
-	// Unix keeps an unlinked file readable through the descriptor PDFium
-	// holds, so delete the copy now: nothing is left behind however the
-	// process ends (the presenter process exits via os.Exit, skipping
-	// Close). Windows refuses while the file is open; Close deletes it there.
+	// An unlinked file stays readable through the handle PDFium holds (on
+	// Windows too: wazero opens files with FILE_SHARE_DELETE), so delete
+	// the copy now: nothing is left behind however the process ends (the
+	// presenter process exits via os.Exit, skipping Close). If the OS
+	// refuses, Close deletes it instead.
 	if os.RemoveAll(dir) != nil {
 		doc.cleanup = cleanup
 	}

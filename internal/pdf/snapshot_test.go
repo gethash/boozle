@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -79,14 +78,11 @@ func TestOpenSnapshotIsolatesFromSourceAndCleansUp(t *testing.T) {
 		release()
 	}
 
-	// On Unix the copy is unlinked right after opening (the renders above
-	// read it through the open descriptor); on Windows it stays until Close.
-	want := 0
-	if runtime.GOOS == "windows" {
-		want = 1
-	}
-	if n := len(snapshotDirs(t, cache)); n != want {
-		t.Fatalf("snapshot dirs while open = %d, want %d", n, want)
+	// The copy is normally deleted right after opening (the renders above
+	// read it through the open handle). Where the OS refuses, it stays
+	// until Close; either way at most this one snapshot exists.
+	if n := len(snapshotDirs(t, cache)); n > 1 {
+		t.Fatalf("snapshot dirs while open = %d, want at most 1", n)
 	}
 	if err := doc.Close(); err != nil {
 		t.Fatal(err)

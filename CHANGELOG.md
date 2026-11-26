@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-11-26
+
+### Added
+
+- **Live reload.** `--watch` (or `watch = true` in the sidecar) reloads the deck when the PDF or its sidecar changes on disk, and `r` reloads by hand from either window. Both windows stay on the same page, the previous version stays on screen until the new slide is rendered, and a half-written or broken file is ignored until it settles. A reload also re-reads notes, page selection, timings, loop, progress, autoquit, transition and background.
+
+### Changed
+
+- **Window icon** follows the new Boozle logo: the "b" standing on four progress segments, from the design system's `boozle-app-icon.svg`.
+- Boozle now presents from a private copy of the PDF in its cache directory (on macOS and Linux it is unlinked as soon as it is open, so nothing is left behind), so the original can be overwritten or replaced while presenting without disturbing the open deck.
+
 ## [1.4.0] — 2026-11-06
 
 ### Changed

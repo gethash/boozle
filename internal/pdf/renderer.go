@@ -46,6 +46,10 @@ type Doc struct {
 	// pageSizes is filled once in Open and immutable afterwards, so
 	// PageSize never waits behind a render holding mu.
 	pageSizes []Page
+
+	// cleanup runs after Close has released PDFium (OpenSnapshot deletes
+	// its copy there). May be nil.
+	cleanup func()
 }
 
 // Page is the natural size of a PDF page, in PDF points (72 dpi).
@@ -215,6 +219,9 @@ func (d *Doc) Close() error {
 	}
 	if err := d.pool.Close(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if d.cleanup != nil {
+		d.cleanup()
 	}
 	return firstErr
 }

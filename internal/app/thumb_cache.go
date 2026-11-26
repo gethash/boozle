@@ -29,10 +29,13 @@ type overviewThumbStore struct {
 	disk *overviewDiskThumbCache
 }
 
-func newOverviewThumbStore(pdfPath string) *overviewThumbStore {
+// newOverviewThumbStore returns a store for the PDF at pdfPath; info is the
+// version that was opened (nil = stat the file now). Thumbnails on disk are
+// keyed by it.
+func newOverviewThumbStore(pdfPath string, info os.FileInfo) *overviewThumbStore {
 	return &overviewThumbStore{
 		gpu:  pdf.NewCache(overviewThumbCacheMin),
-		disk: newOverviewDiskThumbCache(pdfPath),
+		disk: newOverviewDiskThumbCache(pdfPath, info),
 	}
 }
 
@@ -134,14 +137,18 @@ type overviewDiskThumbCache struct {
 	base string
 }
 
-func newOverviewDiskThumbCache(pdfPath string) *overviewDiskThumbCache {
+// newOverviewDiskThumbCache keys thumbnails by pdfPath and info's size and
+// modification time; info is the version of the file that was opened (from
+// pdf.OpenSnapshot), or nil to stat the file now.
+func newOverviewDiskThumbCache(pdfPath string, info os.FileInfo) *overviewDiskThumbCache {
 	abs, err := filepath.Abs(pdfPath)
 	if err != nil {
 		abs = pdfPath
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil
+	if info == nil {
+		if info, err = os.Stat(abs); err != nil {
+			return nil
+		}
 	}
 	root, err := cachedir.Dir("thumbs")
 	if err != nil {

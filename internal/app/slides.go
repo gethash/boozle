@@ -3,6 +3,7 @@ package app
 import (
 	"image"
 	"math"
+	"os"
 	"runtime"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -39,11 +40,13 @@ type pipeline struct {
 	uploadedSinceGC int
 }
 
-func newPipeline(doc *pdf.Doc, pdfPath string, cacheMB int) *pipeline {
+// newPipeline renders doc, which was opened from pdfPath; info is the
+// version of the file that was opened (nil = stat it now).
+func newPipeline(doc *pdf.Doc, pdfPath string, info os.FileInfo, cacheMB int) *pipeline {
 	p := &pipeline{
 		doc:    doc,
 		slides: pdf.NewCache(cacheBudgetInitial),
-		thumbs: newOverviewThumbStore(pdfPath),
+		thumbs: newOverviewThumbStore(pdfPath, info),
 	}
 	if cacheMB > 0 {
 		p.slides.Resize(cacheMB << 20)

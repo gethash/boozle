@@ -17,6 +17,7 @@ import (
 
 	"github.com/gethash/boozle/internal/config"
 	"github.com/gethash/boozle/internal/display"
+	"github.com/gethash/boozle/internal/filewatch"
 	"github.com/gethash/boozle/internal/ipc"
 	"github.com/gethash/boozle/internal/pdf"
 	"github.com/gethash/boozle/internal/timer"
@@ -56,31 +57,39 @@ const (
 	presenterCmdPageUp     = "page-up"
 	presenterCmdDigit      = "digit"
 	presenterCmdOverviewGo = "overview-go"
+	presenterCmdReload     = "reload"
 
 	// transitionMaxWaitFrames bounds how long a transition waits for the
 	// target slide's render before animating anyway (e.g. a broken page).
 	transitionMaxWaitFrames = 60
 )
 
+// RunOptions configures reloading (--watch and the r key).
+type RunOptions struct {
+	// LoadConfig re-reads flags and sidecar for a reload; nil keeps the
+	// startup configuration.
+	LoadConfig func() (config.Config, error)
+	// SidecarPaths are watched along with the PDF when cfg.Watch is set.
+	SidecarPaths []string
+}
+
 // Run opens the presentation window and blocks until the user quits.
-func Run(cfg config.Config) error {
+func Run(cfg config.Config, opts RunOptions) error {
 	opened := time.Now()
-	doc, err := pdf.Open(cfg.PDFPath)
+	d, err := openDeck(cfg.PDFPath, cfg.CacheMB)
 	if err != nil {
 		return err
 	}
-	defer doc.Close()
+	doc, pipe := d.doc, d.pipe
 	if cfg.DebugStats {
 		fmt.Fprintf(os.Stderr, "[boozle audience] pdf open %v (%d pages)\n", time.Since(opened).Round(time.Millisecond), doc.PageCount())
 	}
 
 	pageList := buildPageList(doc.PageCount(), cfg)
 	if len(pageList) == 0 {
+		d.close()
 		return fmt.Errorf("no pages to play (page count = %d, --pages = %v)", doc.PageCount(), cfg.PageRange)
 	}
-
-	pipe := newPipeline(doc, cfg.PDFPath, cfg.CacheMB)
-	defer pipe.close()
 
 	auto := timer.New(cfg.Auto, cfg.PerPage)
 	startIdx := initialIndex(pageList, cfg.StartPage)
@@ -89,11 +98,23 @@ func Run(cfg config.Config) error {
 	g := &Game{
 		cfg:       cfg,
 		bg:        color.RGBA{cfg.Background.R, cfg.Background.G, cfg.Background.B, cfg.Background.A},
+		doc:       doc,
 		pipe:      pipe,
 		auto:      auto,
 		pageList:  pageList,
 		listIdx:   startIdx,
 		startedAt: time.Now(),
+		reload:    newReloader(cfg.PDFPath, cfg.CacheMB, opts.LoadConfig),
+	}
+	// Reloads replace g.doc and g.pipe, so close whatever is current.
+	defer func() {
+		g.reload.close()
+		(&deck{doc: g.doc, pipe: g.pipe}).close()
+	}()
+	if cfg.Watch {
+		w := filewatch.New(append([]string{cfg.PDFPath}, opts.SidecarPaths...), 0)
+		defer w.Close()
+		g.watch = w.Changes()
 	}
 	if cfg.DebugStats {
 		g.stats = &statsReporter{role: "audience"}
@@ -120,11 +141,12 @@ func Run(cfg config.Config) error {
 		if err := validatePresenterMonitor(audienceMon, presenterMon, cfg.NoFullscreen); err != nil {
 			return err
 		}
-		srv, err := ipc.Listen(ipc.Hello{PageList: pageList, Notes: cfg.Notes, StartedAt: g.startedAt, Loop: cfg.Loop})
+		srv, err := ipc.Listen(g.hello())
 		if err != nil {
 			return fmt.Errorf("presenter IPC: %w", err)
 		}
 		defer srv.Close()
+		g.srv = srv
 		go srv.Accept()
 
 		self, err := os.Executable()
@@ -252,8 +274,13 @@ const presenterSpawnTimeout = 120
 type Game struct {
 	cfg  config.Config
 	bg   color.RGBA
+	doc  *pdf.Doc
 	pipe *pipeline
 	auto *timer.Auto
+
+	reload     *reloader       // nil in tests
+	watch      <-chan struct{} // file changes; nil without --watch
+	generation int             // reloads so far (sent to the presenter)
 
 	pageList  []int // 0-indexed page numbers, in playback order
 	listIdx   int   // index into pageList
@@ -288,6 +315,7 @@ type Game struct {
 	place   *monitorPlacer // fullscreen placement; nil when windowed
 
 	stateCh        chan ipc.PresenterState // nil when presenter view is disabled
+	srv            *ipc.Server             // nil when presenter view is disabled
 	presenterCmds  <-chan ipc.PresenterCommand
 	spawnPresenter func() error // starts the presenter process once; then nil
 	ticks          int
@@ -347,6 +375,7 @@ func (g *Game) Update() error {
 		g.pipe.drain()
 	}
 	presenterCmds := g.drainPresenterCommands()
+	g.updateReload(presenterCmds)
 	g.updateCursor()
 	defer func() { g.stats.tick(g.pipe, g.listIdx) }()
 
@@ -566,9 +595,12 @@ func autoBudget(bufW, bufH int) int {
 func (g *Game) currentPage() int { return g.pageList[g.listIdx] }
 
 // displayIsCurrent reports whether the image on screen shows the current
-// page (possibly as a scaled stand-in).
+// page (possibly as a scaled stand-in) of the current deck. After a reload
+// the previous version's slide stays up, in its old bounds, until the new
+// render lands.
 func (g *Game) displayIsCurrent() bool {
-	return g.disp.img != nil && g.disp.key.Page == g.currentPage()
+	return g.disp.img != nil && g.disp.key.Page == g.currentPage() &&
+		(g.pipe == nil || g.disp.cache == g.pipe.slides)
 }
 
 // refreshDisplay keeps the on-screen slide in step with listIdx without
@@ -588,7 +620,7 @@ func (g *Game) refreshDisplay() {
 		g.dispWanted = want
 		g.pipe.requestNow(want)
 	}
-	if g.disp.key != want {
+	if g.disp.key != want || g.disp.cache != g.pipe.slides {
 		if img, key := g.pipe.resolve(want); img != nil {
 			g.disp.set(g.pipe.slides, img, key)
 		}

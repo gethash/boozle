@@ -96,6 +96,48 @@ func TestHelloStateAndCommandRoundTrip(t *testing.T) {
 	}
 }
 
+// waitForHello polls the receiver until its Hello has generation gen.
+func waitForHello(t *testing.T, recv *Receiver, gen int) Hello {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if h, ok := recv.Hello(); ok && h.Generation == gen {
+			return h
+		}
+		if time.Now().After(deadline) {
+			h, _ := recv.Hello()
+			t.Fatalf("hello generation = %d, want %d", h.Generation, gen)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestUpdateHelloReachesConnectedAndLatePresenters(t *testing.T) {
+	srv, err := Listen(Hello{PageList: []int{0, 1, 2}})
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Close()
+
+	// Updated before anyone connects: the connect replays the latest Hello.
+	srv.UpdateHello(Hello{PageList: []int{0, 1}, Generation: 1})
+	go srv.Accept()
+	recv, err := Connect(srv.Path(), func() {})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if h := waitForHello(t, recv, 1); !reflect.DeepEqual(h.PageList, []int{0, 1}) {
+		t.Fatalf("late presenter page list = %v, want [0 1]", h.PageList)
+	}
+
+	// Updated while connected.
+	srv.UpdateHello(Hello{PageList: []int{0, 1, 2, 3}, Notes: map[int]string{4: "new"}, Loop: true, Generation: 2})
+	h := waitForHello(t, recv, 2)
+	if !reflect.DeepEqual(h.PageList, []int{0, 1, 2, 3}) || h.Notes[4] != "new" || !h.Loop {
+		t.Fatalf("updated hello = %+v", h)
+	}
+}
+
 func TestFractionAtExtrapolatesAndClamps(t *testing.T) {
 	st := PresenterState{Fraction: 0.5, FractionPerSec: 0.25}
 	recv := time.Now()

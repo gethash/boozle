@@ -52,6 +52,7 @@ boozle slides.pdf --monitor 1 --presenter-monitor 0
 - **Speaker notes:** read notes from Boozle TOML sidecars, `.pdfpc` sidecars, or imported PowerPoint notes.
 - **PowerPoint speaker-note import:** extract `.pptx` notes once with `boozle notes import`, then present with only the PDF plus sidecar.
 - **Slide overview:** press `Tab` for a thumbnail grid and jump to any slide with the keyboard or mouse.
+- **Live reload:** with `--watch`, a regenerated PDF or edited sidecar appears on both screens without a restart, on the same page; `r` reloads by hand.
 - **Monitor selection:** list displays with `--list-monitors`, then choose audience and presenter monitors by index or by name (e.g. `--monitor HDMI-1`).
 - **HiDPI rendering:** rasterise pages at native monitor resolution for Retina and 4K displays.
 - **Fast and lean:** slides render in the background with prefetching, startup takes a fraction of a second, and memory stays bounded on large decks; `--cache-mb` and `--render-scale` tune it further.
@@ -80,7 +81,7 @@ The script detects your OS and architecture, downloads the right archive, verifi
 Override the version or install directory with environment variables:
 
 ```bash
-BOOZLE_VERSION=v1.4.0 BOOZLE_INSTALL_DIR=~/bin \
+BOOZLE_VERSION=v1.5.0 BOOZLE_INSTALL_DIR=~/bin \
   curl -fsSL https://github.com/gethash/boozle/releases/latest/download/install.sh | sh
 ```
 
@@ -133,6 +134,21 @@ boozle slides.pdf --auto 30s --autoquit
 ```
 
 Use `--auto <duration>` for timed advance. Add `--loop` for kiosk or lobby screens, or `--autoquit` to close Boozle when it advances past the last slide — whether by timer or by pressing next. Without `--loop` or `--autoquit`, navigation simply stops at the first and last slide.
+
+### Live Reload
+
+```bash
+boozle slides.pdf --watch
+boozle slides.pdf --auto 20s --loop --watch
+```
+
+With `--watch` (or `watch = true` in the sidecar), Boozle reloads the PDF whenever it changes on disk — handy while rebuilding a LaTeX, Typst or Markdown deck during rehearsal, or for a lobby screen whose PDF is replaced on a schedule. It also reloads when the sidecar changes, so edited notes and timings show up too. Press `r` to reload by hand, with or without `--watch`.
+
+- Both windows stay on the same page number; if that page no longer exists, Boozle shows the nearest later one, or the last page.
+- The previous version stays on screen until the new slide is rendered, so a reload never flashes black.
+- A file that is still being written, or that can't be opened, is ignored and the previous version stays up; Boozle tries again on the next change.
+- A reload re-reads notes, `pages`, `auto`, per-page timings, `loop`, `progress`, `autoquit`, `transition` and `bg`. Monitor, fullscreen, `cache_mb` and `render_scale` keep their startup values.
+- Boozle presents from a private copy of the PDF in its cache directory, so editors and build tools can overwrite or replace the file at any time.
 
 ### Displays and Presenter View
 
@@ -223,6 +239,7 @@ boozle <file.pdf> [flags]
 | `-M, --list-monitors` | `false` | List available monitors and exit. |
 | `--cache-mb <N>` | `0` / auto | GPU page cache cap in MB; `0` auto-sizes to display. |
 | `--render-scale <F>` | `0` / native | Render at fraction of native pixels (`0.5..1.0`); `0` keeps native. |
+| `--watch` | `false` | Reload when the PDF or its sidecar changes on disk. |
 | `--debug-stats` | `false` | Print memory, render and monitor-placement diagnostics to stderr. |
 | `-h, --help` | | Show help. |
 | `-v, --version` | | Show version. |
@@ -256,6 +273,7 @@ The same keys work from the audience display and from presenter view when that w
 | `b` | Toggle black-out screen. |
 | `w` | Toggle white-out screen. |
 | `f` | Toggle fullscreen (of the audience window). |
+| `r` | Reload the PDF and its sidecar. |
 | `Tab` | Open the slide overview (not while blacked or whited out). |
 | `q`, `Esc` | Quit. |
 
@@ -281,6 +299,7 @@ transition = "fade"
 # presenter_monitor = "HDMI-1"   # index or name
 # cache_mb     = 64
 # render_scale = 0.75
+# watch        = true
 
 [[page]]
 n    = 3
@@ -295,7 +314,7 @@ n    = 8
 auto = "5s"
 ```
 
-Supported top-level TOML keys are `auto`, `loop`, `start`, `monitor`, `pages`, `bg`, `progress`, `autoquit`, `transition`, `presenter_monitor`, `cache_mb`, and `render_scale`. `monitor` and `presenter_monitor` take an index or a monitor name.
+Supported top-level TOML keys are `auto`, `loop`, `start`, `monitor`, `pages`, `bg`, `progress`, `autoquit`, `transition`, `presenter_monitor`, `cache_mb`, `render_scale`, and `watch`. `monitor` and `presenter_monitor` take an index or a monitor name.
 
 Per-page entries use `[[page]]` with:
 
@@ -324,6 +343,9 @@ boozle deck.pdf --auto 30s --progress
 
 # Lobby kiosk:
 boozle deck.pdf --auto 20s --loop --progress
+
+# Rehearse while rebuilding the PDF, presenter view on a single screen:
+boozle deck.pdf --watch --no-fullscreen -P 0
 
 # Play once and close:
 boozle deck.pdf --auto 30s --autoquit

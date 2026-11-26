@@ -2,10 +2,11 @@
 // window (master) and the presenter-view subprocess (slave).
 //
 // The protocol is newline-delimited JSON. On connect the master sends one
-// Hello with everything that never changes during a run (play list, notes,
-// start time), followed by the current PresenterState. After that, states
-// are only sent when something visible changes; the presenter extrapolates
-// clocks and auto-advance progress locally.
+// Hello with everything that only changes when the deck is reloaded (play
+// list, notes, start time), followed by the current PresenterState. After
+// that, states are only sent when something visible changes; the presenter
+// extrapolates clocks and auto-advance progress locally. A reload sends a
+// new Hello with a higher Generation.
 package ipc
 
 import (
@@ -20,12 +21,16 @@ import (
 	"time"
 )
 
-// Hello carries the static presentation data, sent once per connection.
+// Hello carries the presentation data that only changes on reload. It is
+// sent on connect and again after every reload.
 type Hello struct {
 	PageList  []int          `json:"page_list"`  // 0-indexed page numbers in playback order
 	Notes     map[int]string `json:"notes"`      // keyed by 1-indexed page, as in sidecars
 	StartedAt time.Time      `json:"started_at"` // presentation start (for the elapsed clock)
 	Loop      bool           `json:"loop"`       // --loop: navigation wraps around
+	// Generation counts reloads of the PDF: when it grows, the presenter
+	// reopens the file.
+	Generation int `json:"generation,omitempty"`
 }
 
 // PresenterState is the dynamic part of the presentation.
@@ -149,6 +154,20 @@ func (s *Server) Accept() {
 	}
 	s.wmu.Unlock()
 	go s.readCommands(conn)
+}
+
+// UpdateHello replaces the Hello (after a reload) and sends it to the
+// presenter if one is connected; a later connect gets the new one.
+func (s *Server) UpdateHello(h Hello) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	s.mu.Lock()
+	s.hello = h
+	conn := s.conn
+	s.mu.Unlock()
+	if conn != nil {
+		s.write(conn, message{Hello: &h})
+	}
 }
 
 // Commands returns the stream of keyboard commands sent by the presenter

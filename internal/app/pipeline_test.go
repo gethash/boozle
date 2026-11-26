@@ -37,7 +37,7 @@ func newTestPipeline(t *testing.T, pages int) *pipeline {
 	// cache (compiling under -race takes ~10s) while thumbnails stay
 	// hermetic.
 	t.Setenv("BOOZLE_CACHE_DIR", t.TempDir())
-	p := newPipeline(doc, path, 0)
+	p := newPipeline(doc, path, nil, 0)
 	t.Cleanup(func() {
 		p.close()
 		_ = doc.Close()

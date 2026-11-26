@@ -37,6 +37,7 @@ type Flags struct {
 	CacheMB          int     // 0 = auto-size to display
 	RenderScale      float64 // 0 = native; 0.5..1.0 reduces per-page pixel count
 	DebugStats       bool    // print memory/render diagnostics to stderr
+	Watch            bool    // reload when the PDF or its sidecar changes
 }
 
 // Config is the resolved configuration the app actually runs with.
@@ -65,6 +66,7 @@ type Config struct {
 	CacheMB          int     // 0 = auto-size to display; otherwise hard cap in MB
 	RenderScale      float64 // 0 = native; 0.5..1.0 fraction of native pixels for renders
 	DebugStats       bool    // print memory/render diagnostics to stderr
+	Watch            bool    // reload when the PDF or its sidecar changes
 }
 
 // PresenterEnabled reports whether a presenter view was requested.
@@ -105,6 +107,7 @@ type sidecar struct {
 	PresenterMonitor *MonitorSpec   `toml:"presenter_monitor"`
 	CacheMB          *int           `toml:"cache_mb"`
 	RenderScale      *float64       `toml:"render_scale"`
+	Watch            *bool          `toml:"watch"`
 	PerPage          []perPageEntry `toml:"page"`
 	PlaybackPages    []int          `toml:"-"`
 	HasPlaybackPages bool           `toml:"-"`
@@ -133,6 +136,7 @@ func Load(f Flags) (Config, error) {
 		CacheMB:          f.CacheMB,
 		RenderScale:      f.RenderScale,
 		DebugStats:       f.DebugStats,
+		Watch:            f.Watch,
 		PerPage:          map[int]time.Duration{},
 		Notes:            map[int]string{},
 	}
@@ -163,6 +167,7 @@ func Load(f Flags) (Config, error) {
 		setIf(&c.Transition, side.Transition, unset("transition"))
 		setIf(&c.CacheMB, side.CacheMB, unset("cache-mb"))
 		setIf(&c.RenderScale, side.RenderScale, unset("render-scale"))
+		setIf(&c.Watch, side.Watch, unset("watch"))
 		if side.Monitor != nil && unset("monitor") {
 			c.Monitor = string(*side.Monitor)
 		}
@@ -263,12 +268,25 @@ func SidecarPath(file string) string {
 	return strings.TrimSuffix(file, filepath.Ext(file)) + ".boozle.toml"
 }
 
+// SidecarWatchPaths returns the sidecar files whose changes should reload
+// the presentation: the explicit --config file, or else every sidecar Load
+// would look for, so that creating one is noticed too.
+func SidecarWatchPaths(pdfPath, override string) []string {
+	if override != "" {
+		return []string{override}
+	}
+	return []string{SidecarPath(pdfPath), pdfpcPath(pdfPath)}
+}
+
+func pdfpcPath(pdfPath string) string {
+	return strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + ".pdfpc"
+}
+
 func resolveSidecarPath(pdfPath, override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	pdfpc := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + ".pdfpc"
-	for _, path := range []string{SidecarPath(pdfPath), pdfpc} {
+	for _, path := range []string{SidecarPath(pdfPath), pdfpcPath(pdfPath)} {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		} else if !os.IsNotExist(err) {

@@ -71,6 +71,7 @@ type Scheduler struct {
 	drained      chan struct{} // signalled when Drain frees pending bytes
 	pendingBytes int           // guarded by mu
 	stop         chan struct{}
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 
 	statsMu    sync.Mutex
@@ -101,9 +102,10 @@ func (s *Scheduler) Start() {
 	go s.worker()
 }
 
-// Stop terminates the worker and releases any undelivered results.
+// Stop terminates the worker and releases any undelivered results. It is
+// safe to call more than once.
 func (s *Scheduler) Stop() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.wg.Wait()
 	for {
 		select {

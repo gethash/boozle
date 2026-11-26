@@ -35,7 +35,9 @@ type PresenterOptions struct {
 // slide and next-slide preview on top, speaker notes and clock, slide
 // counter, elapsed time and progress in a bottom row (see presenterLayout).
 type PresenterGame struct {
+	doc      *pdf.Doc
 	pipe     *pipeline
+	reload   *reloader // nil in tests
 	receiver *ipc.Receiver
 	place    *monitorPlacer
 	hello    ipc.Hello
@@ -56,6 +58,7 @@ type PresenterGame struct {
 	statusBar      segmentedBar
 
 	ov     overview
+	ovGen  int // Hello generation the overview was built for
 	redraw redrawGate[presenterFrame]
 	stats  *statsReporter
 }
@@ -106,24 +109,32 @@ func (c *clockCache) String(now time.Time) string {
 // presenter-slave subprocess.
 func RunPresenter(opts PresenterOptions) error {
 	opened := time.Now()
-	doc, err := pdf.Open(opts.PDFPath)
+	d, err := openDeck(opts.PDFPath, opts.CacheMB)
 	if err != nil {
 		return err
 	}
-	defer doc.Close()
 	if opts.DebugStats {
 		fmt.Fprintf(os.Stderr, "[boozle presenter] pdf open %v\n", time.Since(opened).Round(time.Millisecond))
 	}
 
-	pipe := newPipeline(doc, opts.PDFPath, opts.CacheMB)
-	defer pipe.close()
-
 	receiver, err := ipc.Connect(opts.SocketPath, func() { os.Exit(0) })
 	if err != nil {
+		d.close()
 		return fmt.Errorf("presenter: connect to master: %w", err)
 	}
 
-	g := &PresenterGame{pipe: pipe, receiver: receiver, opts: opts}
+	g := &PresenterGame{
+		doc:      d.doc,
+		pipe:     d.pipe,
+		reload:   newReloader(opts.PDFPath, opts.CacheMB, nil),
+		receiver: receiver,
+		opts:     opts,
+	}
+	// Reloads replace g.doc and g.pipe, so close whatever is current.
+	defer func() {
+		g.reload.close()
+		(&deck{doc: g.doc, pipe: g.pipe}).close()
+	}()
 	if opts.DebugStats {
 		g.stats = &statsReporter{role: "presenter"}
 	}
@@ -155,9 +166,14 @@ func RunPresenter(opts PresenterOptions) error {
 func (g *PresenterGame) Update() error {
 	g.place.tick(ebitenWindow{})
 	g.pipe.drain()
-	if !g.hasHello {
-		g.hello, g.hasHello = g.receiver.Hello()
+	if h, ok := g.receiver.Hello(); ok {
+		// A new generation means the audience reloaded the PDF.
+		if g.hasHello && h.Generation != g.hello.Generation && g.reload != nil {
+			g.reload.request()
+		}
+		g.hello, g.hasHello = h, true
 	}
+	g.updateReload()
 	st, _, _ := g.receiver.Latest()
 	if g.hasHello && g.receiver.Ready() && len(g.hello.PageList) > 0 && g.bufW > 0 && g.bufH > 0 {
 		g.syncOverview(st)
@@ -178,10 +194,11 @@ func (g *PresenterGame) syncOverview(st ipc.PresenterState) {
 		return
 	}
 	n := len(g.hello.PageList)
-	if g.ov.phase == ovOff || g.ov.bufW != g.bufW || g.ov.bufH != g.bufH {
+	if g.ov.phase == ovOff || g.ov.bufW != g.bufW || g.ov.bufH != g.bufH || g.ovGen != g.hello.Generation {
 		g.ov.release(g.pipe)
 		g.ov = newOverview(g.hello.PageList, g.bufW, g.bufH, st.Overview.FromIndex)
 		g.ov.attach(g.pipe)
+		g.ovGen = g.hello.Generation
 	}
 	g.ov.phase = ovPhase(st.Overview.Phase)
 	g.ov.anim = st.Overview.Anim
@@ -207,7 +224,7 @@ func (g *PresenterGame) refreshPanes(st ipc.PresenterState) {
 			g.curWanted = key
 			g.pipe.requestNow(key)
 		}
-		if g.cur.key != key {
+		if g.cur.key != key || g.cur.cache != g.pipe.slides {
 			if img, got := g.pipe.resolve(key); img != nil {
 				g.cur.set(g.pipe.slides, img, got)
 			}
@@ -218,7 +235,7 @@ func (g *PresenterGame) refreshPanes(st ipc.PresenterState) {
 	if st.NextPage >= 0 {
 		if key, _, _, ok := g.pipe.fit(st.NextPage, lo.nextContent.w, lo.nextContent.h); ok {
 			visible = append(visible, g.pipe.missing(key)...)
-			if g.next.key != key {
+			if g.next.key != key || g.next.cache != g.pipe.slides {
 				if img, got := g.pipe.resolve(key); img != nil {
 					g.next.set(g.pipe.slides, img, got)
 				}
@@ -461,6 +478,7 @@ var presenterKeys = []struct {
 	{ebiten.KeySpace, presenterCmdSpace},
 	{ebiten.KeyPageDown, presenterCmdPageDown},
 	{ebiten.KeyPageUp, presenterCmdPageUp},
+	{ebiten.KeyR, presenterCmdReload},
 }
 
 func (g *PresenterGame) forwardInput() {

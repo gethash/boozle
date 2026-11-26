@@ -48,6 +48,10 @@ autoquit = false
 # Equivalent to --transition.
 transition = "slide"
 
+# Reload when the PDF or this file changes on disk (r reloads by hand).
+# Equivalent to --watch.
+# watch = true
+
 # Memory tuning (see README "Performance and memory"):
 # cache_mb     = 64    # cap the GPU slide cache at 64 MB (0 = automatic)
 # render_scale = 0.75  # render at 75% of native pixels (0.5..1.0; 0 = native)

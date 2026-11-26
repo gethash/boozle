@@ -510,7 +510,7 @@ func TestOverviewLoadOrderIsBoundedAndPrioritized(t *testing.T) {
 
 func TestOverviewAttachQueuesEveryPageOnce(t *testing.T) {
 	p := &pipeline{
-		thumbs: newOverviewThumbStore(""),
+		thumbs: newOverviewThumbStore("", nil),
 		sched:  pdf.NewScheduler(nil, nil),
 	}
 	pageList := make([]int, 97)
@@ -576,7 +576,7 @@ func TestPresenterModeOverviewDoesNotStartMasterThumbnails(t *testing.T) {
 		listIdx:  1,
 		bufW:     1280,
 		bufH:     720,
-		pipe:     &pipeline{thumbs: newOverviewThumbStore(""), sched: pdf.NewScheduler(nil, nil)},
+		pipe:     &pipeline{thumbs: newOverviewThumbStore("", nil), sched: pdf.NewScheduler(nil, nil)},
 	}
 	g.openOverview()
 	if g.ov.phase != ovEntering {
@@ -597,7 +597,7 @@ func TestOverviewDiskThumbCacheInvalidatesByPDFAndDimensions(t *testing.T) {
 	if err := os.WriteFile(pdfPath, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cache := newOverviewDiskThumbCache(pdfPath)
+	cache := newOverviewDiskThumbCache(pdfPath, nil)
 	key := pdf.CacheKey{Page: 3, W: 120, H: 90}
 	img := image.NewRGBA(image.Rect(0, 0, key.W, key.H))
 	cache.Save(key, img)
@@ -615,7 +615,7 @@ func TestOverviewDiskThumbCacheInvalidatesByPDFAndDimensions(t *testing.T) {
 	if err := os.Chtimes(pdfPath, later, later); err != nil {
 		t.Fatal(err)
 	}
-	cache = newOverviewDiskThumbCache(pdfPath)
+	cache = newOverviewDiskThumbCache(pdfPath, nil)
 	if _, ok := cache.Load(key); ok {
 		t.Fatal("changed PDF size/modtime should invalidate old thumbnail")
 	}

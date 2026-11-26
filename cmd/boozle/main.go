@@ -21,7 +21,7 @@ import (
 // release because Homebrew builds from the source tarball without ldflags
 // (TestDefaultVersionMatchesChangelog keeps it in sync).
 var (
-	version = "v1.4.0"
+	version = "v1.5.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -61,6 +61,7 @@ func newRootCmd() *cobra.Command {
 		listMonitors     bool
 		cacheMB          int
 		renderScale      float64
+		watch            bool
 	)
 
 	cmd := &cobra.Command{
@@ -74,6 +75,7 @@ Common examples:
   boozle slides.pdf --auto 30s --progress
   boozle slides.pdf --auto 20s --loop --progress
   boozle slides.pdf --monitor 1 --presenter-monitor 0
+  boozle slides.pdf --watch
   boozle notes import deck.pptx --out deck.boozle.toml
 
 Audience display:
@@ -93,6 +95,7 @@ Keybindings:
   b                          black-out screen (toggle)
   w                          white-out screen (toggle)
   f                          toggle fullscreen (audience window)
+  r                          reload the PDF and its sidecar
   Tab                        slide overview (arrows select, Enter or click
                              jumps, Tab or Esc closes)
   q  Esc                     quit
@@ -103,6 +106,15 @@ Presenter view (--presenter-monitor):
   The same navigation keys work when either display has focus, and the Tab
   overview opens on the presenter screen. Use a monitor different from
   --monitor, or use --no-fullscreen for one-monitor testing.
+
+Reloading:
+  With --watch, Boozle reloads the PDF whenever it changes on disk, and
+  also when its sidecar changes. Both windows keep the current page (by
+  page number), and the previous version stays on screen if the new file
+  can't be opened, e.g. while it is still being written. Press r to reload
+  by hand, with or without --watch. A reload re-reads notes, pages, timings,
+  loop, progress, autoquit, transition and bg; monitor, fullscreen and
+  performance settings keep their startup values.
 
 Monitor selection:
   Use --list-monitors (-M) to print connected displays, then pass an index
@@ -125,7 +137,7 @@ Sidecars:
 
   Supported TOML keys:
     auto, loop, start, monitor, pages, bg, progress, autoquit, transition,
-    presenter_monitor, cache_mb, render_scale
+    presenter_monitor, cache_mb, render_scale, watch
 
   Per-page entries use [[page]] with n, auto, and notes fields.`,
 		Args:          cobra.MaximumNArgs(1),
@@ -163,7 +175,7 @@ Sidecars:
 				})
 			}
 
-			cfg, err := config.Load(config.Flags{
+			flags := config.Flags{
 				PDFPath:          pdfPath,
 				Auto:             auto,
 				Loop:             loop,
@@ -181,12 +193,17 @@ Sidecars:
 				CacheMB:          cacheMB,
 				RenderScale:      renderScale,
 				DebugStats:       debugStats,
-			})
+				Watch:            watch,
+			}
+			cfg, err := config.Load(flags)
 			if err != nil {
 				return err
 			}
 
-			return app.Run(cfg)
+			return app.Run(cfg, app.RunOptions{
+				LoadConfig:   func() (config.Config, error) { return config.Load(flags) },
+				SidecarPaths: config.SidecarWatchPaths(pdfPath, configPath),
+			})
 		},
 	}
 
@@ -207,6 +224,7 @@ Sidecars:
 	cmd.Flags().BoolVarP(&listMonitors, "list-monitors", "M", false, "list available monitors and exit")
 	cmd.Flags().IntVar(&cacheMB, "cache-mb", 0, "GPU page cache cap in MB (0 = auto-size to display)")
 	cmd.Flags().Float64Var(&renderScale, "render-scale", 0, "render at fraction of native pixels (0.5..1.0; 0 = native)")
+	cmd.Flags().BoolVar(&watch, "watch", false, "reload when the PDF or its sidecar changes (r reloads by hand)")
 	cmd.Flags().StringVar(&presenterSocket, "_presenter-socket", "", "")
 	_ = cmd.Flags().MarkHidden("_presenter-socket")
 	cmd.Flags().BoolVar(&debugStats, "debug-stats", false, "print memory and render diagnostics to stderr every 2s")
@@ -306,6 +324,7 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "  -s, --start <N>         start at page N (1-indexed)")
 	fmt.Fprintln(w, "      --pages <range>     restrict to pages, e.g. 3-7,10")
 	fmt.Fprintln(w, "      --transition <style>  slide, fade, or none")
+	fmt.Fprintln(w, "      --watch             reload when the PDF or its sidecar changes")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "      --bg <#hex>         background color around the slide")
 	fmt.Fprintln(w)
@@ -319,7 +338,7 @@ func printNoArgsHint(w io.Writer) {
 	fmt.Fprintln(w, "  Auto-loads slides.boozle.toml or slides.pdfpc next to slides.pdf;")
 	fmt.Fprintln(w, "  flags given on the command line win over sidecar values.")
 	fmt.Fprintln(w, "  TOML keys include auto, loop, pages, bg, progress, autoquit, transition,")
-	fmt.Fprintln(w, "  monitor, presenter_monitor, cache_mb, render_scale, and [[page]] notes.")
+	fmt.Fprintln(w, "  monitor, presenter_monitor, cache_mb, render_scale, watch, and [[page]] notes.")
 	fmt.Fprintln(w, "      --config <path>     explicit .boozle.toml or .pdfpc sidecar")
 	fmt.Fprintln(w, "  boozle notes import deck.pptx --out deck.boozle.toml")
 	fmt.Fprintln(w)

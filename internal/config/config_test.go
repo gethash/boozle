@@ -453,6 +453,52 @@ func TestLoadCacheAndRenderScaleSidecar(t *testing.T) {
 	}
 }
 
+func TestLoadWatchSidecarAndFlag(t *testing.T) {
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "deck.pdf")
+	if err := os.WriteFile(pdfPath, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(Flags{PDFPath: pdfPath, StartPage: 1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Watch {
+		t.Error("Watch should default to off")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "deck.boozle.toml"), []byte("watch = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(Flags{PDFPath: pdfPath, StartPage: 1})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Watch {
+		t.Error("sidecar watch = true should enable Watch")
+	}
+
+	// An explicit --watch=false beats the sidecar.
+	c, err = Load(Flags{PDFPath: pdfPath, StartPage: 1, Watch: false, Changed: changed("watch")})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Watch {
+		t.Error("explicit --watch=false should win over the sidecar")
+	}
+}
+
+func TestSidecarWatchPaths(t *testing.T) {
+	got := SidecarWatchPaths(filepath.Join("talks", "deck.pdf"), "")
+	want := []string{filepath.Join("talks", "deck.boozle.toml"), filepath.Join("talks", "deck.pdfpc")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SidecarWatchPaths = %v, want %v", got, want)
+	}
+	if got := SidecarWatchPaths("deck.pdf", "other.toml"); !reflect.DeepEqual(got, []string{"other.toml"}) {
+		t.Errorf("SidecarWatchPaths with --config = %v, want [other.toml]", got)
+	}
+}
+
 func TestParseColor(t *testing.T) {
 	tests := []struct {
 		in   string
